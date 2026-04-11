@@ -141,7 +141,7 @@ class TestFundingHarvestStrategy:
 
     @pytest.mark.asyncio
     async def test_should_enter_above_threshold(self):
-        s = self._make_strategy(funding_rate=0.0003)  # 3x baseline = entry
+        s = self._make_strategy(funding_rate=0.00031)  # above 3x baseline threshold
         assert await s.should_enter() is True
 
     @pytest.mark.asyncio

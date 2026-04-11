@@ -68,9 +68,8 @@ async def test_margin_ok(risk_guard, mock_exchange):
     # Let's give more room
     mock_exchange.get_balance.return_value = Balance(available=1.5, total=2.0, currency="BTC")
     result = await risk_guard.check_margin()
-    assert result.action == RiskAction.WARNING  # 25% util < 40%, actually should be OK
-    # recompute: used=0.5, util=0.25 < 0.40 → OK
-    assert result.action == RiskAction.OK or result.margin_utilization < 0.40
+    # used=0.5, util=0.25 < 0.40 → OK
+    assert result.action == RiskAction.OK
 
 
 @pytest.mark.asyncio

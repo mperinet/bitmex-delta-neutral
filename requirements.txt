@@ -4,10 +4,10 @@ aiohttp==3.9.5
 websockets==12.0
 
 # Exchange connectivity
-ccxt==4.3.60
+ccxt==4.5.48
 
 # Database
-sqlalchemy==2.0.30
+sqlalchemy==2.0.49
 aiosqlite==0.20.0
 
 # Config

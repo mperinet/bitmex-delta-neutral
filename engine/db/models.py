@@ -21,7 +21,6 @@ from enum import Enum
 
 from sqlalchemy import (
     Column, DateTime, Float, Index, Integer, String, Text, UniqueConstraint,
-    event,
 )
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -182,26 +181,18 @@ _engine: AsyncEngine | None = None
 _session_factory: sessionmaker | None = None
 
 
-def _enable_wal(connection, connection_record):
-    """Enable WAL mode for SQLite to prevent database locked errors
-    under concurrent asyncio writers (order_manager + position_tracker
-    + risk_guard all write in the same event loop)."""
-    if "sqlite" in str(connection.engine.url):
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
-
-
 async def init_db(url: str) -> AsyncSession:
     global _engine, _session_factory
 
     _engine = create_async_engine(url, echo=False)
 
-    # Wire up WAL mode for SQLite connections
-    if "sqlite" in url:
-        from sqlalchemy import event as sa_event
-        sa_event.listen(_engine.sync_engine, "connect", _enable_wal)
-
     async with _engine.begin() as conn:
+        # WAL mode prevents "database locked" under concurrent asyncio writers
+        # (order_manager + position_tracker + risk_guard). Must run before DDL.
+        if "sqlite" in url:
+            from sqlalchemy import text
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.run_sync(Base.metadata.create_all)
 
     _session_factory = sessionmaker(

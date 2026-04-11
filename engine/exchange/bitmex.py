@@ -98,7 +98,7 @@ class BitMEXExchange(ExchangeBase):
             bid=raw["bid"],
             ask=raw["ask"],
             last=raw["last"],
-            mark_price=raw.get("info", {}).get("markPrice", raw["last"]),
+            mark_price=float(raw.get("info", {}).get("markPrice") or raw["last"]),
         )
 
     async def get_balance(self) -> Balance:
@@ -168,7 +168,7 @@ class BitMEXExchange(ExchangeBase):
         with the actual remaining tokens (not a stale 300 after crash).
         """
         try:
-            await self._ccxt.fetch_time()
+            await self._ccxt.fetch_ticker("BTC/USD:BTC")
             remaining = self._ccxt.last_response_headers.get(
                 "x-ratelimit-remaining", 300
             )

@@ -185,7 +185,7 @@ class PositionTracker:
 
     async def _connect_and_stream(self) -> None:
         auth = self._build_auth()
-        async with websockets.connect(self._ws_url) as ws:
+        async with websockets.connect(self._ws_url, max_size=None) as ws:
             # Authenticate
             await ws.send(json.dumps(auth))
             # Subscribe to topics
@@ -239,13 +239,22 @@ class PositionTracker:
             for item in data:
                 symbol = item.get("symbol")
                 if symbol:
+                    raw_ts = item.get("fundingTimestamp")
+                    next_funding_time = None
+                    if raw_ts:
+                        try:
+                            next_funding_time = datetime.fromisoformat(
+                                raw_ts.replace("Z", "+00:00")
+                            )
+                        except (ValueError, AttributeError):
+                            pass
                     await repository.upsert_instrument({
                         "symbol": symbol,
                         "mark_price": item.get("markPrice"),
                         "fair_price": item.get("fairPrice"),
                         "funding_rate": item.get("fundingRate"),
                         "indicative_funding_rate": item.get("indicativeFundingRate"),
-                        "next_funding_time": item.get("fundingTimestamp"),
+                        "next_funding_time": next_funding_time,
                     })
 
         elif table == "margin":

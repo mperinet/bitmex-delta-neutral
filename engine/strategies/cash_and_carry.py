@@ -169,8 +169,13 @@ class CashAndCarryStrategy(TwoLegStrategy):
 
     async def on_funding_payment(self, event: dict) -> None:
         """
-        The perp LONG pays funding when rates are positive.
-        Track cumulative funding paid for the circuit breaker.
+        The perp LONG pays funding when rates are positive and receives when negative.
+
+        cumulative_funding_paid tracks the NET cost (positive = net paid, negative = net
+        received). Negative funding reduces the cumulative, making the circuit breaker less
+        likely to fire — correct, because the trade has become more profitable.
+
+        Circuit breaker: fires when cumulative_funding_paid > circuit_breaker_ratio × locked_basis.
         """
         from engine.db import repository
 
@@ -182,16 +187,17 @@ class CashAndCarryStrategy(TwoLegStrategy):
 
         positions = await repository.get_open_positions(strategy=self.name)
         for pos in positions:
-            # Positive rate: longs PAY — this is a cost to track
-            funding_paid_this_period = max(0.0, rate)
-            new_cumulative = (pos.cumulative_funding_paid or 0.0) + funding_paid_this_period
+            # Positive rate: longs PAY (cost, adds to cumulative).
+            # Negative rate: longs RECEIVE (income, reduces cumulative).
+            funding_this_period = rate
+            new_cumulative = (pos.cumulative_funding_paid or 0.0) + funding_this_period
             await repository.update_position(pos.id, cumulative_funding_paid=new_cumulative)
             logger.info(
-                "funding_paid_recorded",
+                "funding_payment_recorded",
                 strategy=self.name,
                 position_id=pos.id,
                 rate=rate,
-                funding_paid=funding_paid_this_period,
+                funding_this_period=funding_this_period,
                 cumulative=new_cumulative,
                 locked_basis=pos.locked_basis,
                 circuit_breaker_ratio=new_cumulative / (pos.locked_basis or 1),

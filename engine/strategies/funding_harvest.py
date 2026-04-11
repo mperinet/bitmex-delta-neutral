@@ -7,9 +7,13 @@ Collect funding every 8h (04:00, 12:00, 20:00 UTC) while staying delta-neutral.
 Entry signal: funding_rate > threshold (default: 3x baseline = 0.03%/8h)
 Exit signals:
   - Funding rate falls below baseline (0.01%/8h)
-  - Funding flips negative (you'd be paying as a short)
+  - Funding flips negative (you'd be paying as a short; cumulative cost rises)
   - Risk guard: HARD_STOP (margin), REBALANCE (delta drift)
   - Manual / operator trigger
+
+cumulative_funding_paid sign convention (both strategies):
+  positive = net cost (paid more than received)
+  negative = net income (received more than paid)
 
 Funding rate baseline: 0.01%/8h = ~10.95% APR
 Entry threshold (3x): 0.03%/8h = ~32.85% APR
@@ -123,7 +127,13 @@ class FundingHarvestStrategy(TwoLegStrategy):
         """
         Called by position_tracker when a funding payment is exchanged.
         Updates cumulative_funding_paid on all active positions.
-        For this strategy: we're SHORT the perp, so positive funding = we RECEIVE.
+
+        We are SHORT the perp:
+          - Positive rate: we RECEIVE funding (income → reduces cumulative cost).
+          - Negative rate: we PAY funding (cost → increases cumulative cost).
+
+        cumulative_funding_paid tracks the NET cost (positive = net paid, negative = net
+        received). A large positive value signals that the trade has turned costly.
         """
         from engine.db import repository
 
@@ -135,16 +145,16 @@ class FundingHarvestStrategy(TwoLegStrategy):
 
         positions = await repository.get_open_positions(strategy=self.name)
         for pos in positions:
-            # Positive rate: shorts receive → we receive, not pay
-            # We only track funding PAID for the circuit breaker (applies to S1)
-            funding_paid = -rate * (pos.leg_a_qty or 0) if rate > 0 else abs(rate) * (pos.leg_a_qty or 0)
-            new_cumulative = (pos.cumulative_funding_paid or 0.0) + max(0, funding_paid)
+            # Shorts receive when rate > 0 (income, negative cost contribution).
+            # Shorts pay when rate < 0 (cost, positive cost contribution).
+            funding_this_period = -rate
+            new_cumulative = (pos.cumulative_funding_paid or 0.0) + funding_this_period
             await repository.update_position(pos.id, cumulative_funding_paid=new_cumulative)
             logger.info(
                 "funding_payment_recorded",
                 strategy=self.name,
                 position_id=pos.id,
                 rate=rate,
-                funding_paid=funding_paid,
+                funding_this_period=funding_this_period,
                 cumulative=new_cumulative,
             )

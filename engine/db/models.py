@@ -184,6 +184,9 @@ _session_factory: sessionmaker | None = None
 async def init_db(url: str) -> AsyncSession:
     global _engine, _session_factory
 
+    if _engine is not None:
+        return _session_factory  # already initialised
+
     _engine = create_async_engine(url, echo=False)
 
     async with _engine.begin() as conn:

@@ -39,8 +39,7 @@ def get_event_loop():
     return loop
 
 
-@st.cache_resource
-def init_database():
+def _load_db_url() -> str:
     try:
         import tomli as tomllib
     except ImportError:
@@ -48,12 +47,13 @@ def init_database():
     config_path = Path(__file__).parent.parent / "config" / "settings.toml"
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
-    loop = get_event_loop()
-    loop.run_until_complete(init_db(config["database"]["url"]))
-    return loop
+    return config["database"]["url"]
 
 
-loop = init_database()
+# Cache the event loop once per process; init_db is idempotent so calling it
+# on every Streamlit rerun is safe — it returns immediately if already set.
+loop = get_event_loop()
+loop.run_until_complete(init_db(_load_db_url()))
 
 
 def run_async(coro):
@@ -163,7 +163,7 @@ if page == "Live Positions":
 
 elif page == "Funding Rates":
     st.title("Funding Rates")
-    symbol = st.selectbox("Symbol", ["BTC/USD:BTC", "ETH/USD:ETH"])
+    symbol = st.selectbox("Symbol", ["BTC/USD:BTC", "ETH/USD:BTC"])
     df = load_funding_rates(symbol)
 
     if df.empty:

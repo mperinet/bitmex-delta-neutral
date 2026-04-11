@@ -19,6 +19,9 @@ backfill-btc:
 backfill-eth:
 	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "ETH/USD:BTC" --limit 500
 
+backfill:
+	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "$(SYMBOL)" --limit $(or $(LIMIT),500)
+
 engine: setup
 	PYTHONPATH=. .venv/bin/python -m engine.main
 

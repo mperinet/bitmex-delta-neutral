@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import select, update, and_
+from sqlalchemy import distinct, select, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from engine.db.models import (
@@ -71,6 +71,71 @@ async def insert_funding_rate(symbol: str, timestamp: datetime, rate: float) -> 
             await session.commit()
         except Exception:
             await session.rollback()
+
+
+async def get_funding_summary() -> List[dict]:
+    """
+    Return one row per symbol with:
+      - last_rate      : most recent 8h funding rate (%)
+      - predicted_rate : indicative next rate from instruments table (%)
+      - avg_10d        : mean daily avg rate over last 10 days (%)
+    Sorted descending by last_rate.
+    """
+    from sqlalchemy import func, cast, Date as SADate
+
+    async with get_session() as session:
+        # All distinct symbols
+        sym_result = await session.execute(
+            select(distinct(FundingRate.symbol)).order_by(FundingRate.symbol)
+        )
+        symbols = [row[0] for row in sym_result.all()]
+
+        rows = []
+        for symbol in symbols:
+            # Last rate
+            last_result = await session.execute(
+                select(FundingRate.funding_rate)
+                .where(FundingRate.symbol == symbol)
+                .order_by(FundingRate.timestamp.desc())
+                .limit(1)
+            )
+            last_rate = last_result.scalar_one_or_none()
+
+            # Indicative (predicted) rate from instruments
+            inst_result = await session.execute(
+                select(Instrument.indicative_funding_rate)
+                .where(Instrument.symbol == symbol)
+            )
+            predicted_rate = inst_result.scalar_one_or_none()
+
+            # 10-day daily average: fetch last 30 records (3/day × 10 days), avg
+            hist_result = await session.execute(
+                select(FundingRate.funding_rate)
+                .where(FundingRate.symbol == symbol)
+                .order_by(FundingRate.timestamp.desc())
+                .limit(30)
+            )
+            hist_rates = [r[0] for r in hist_result.all()]
+            avg_10d = sum(hist_rates) / len(hist_rates) if hist_rates else None
+
+            rows.append({
+                "symbol": symbol,
+                "last_rate": last_rate,
+                "predicted_rate": predicted_rate,
+                "avg_10d": avg_10d,
+            })
+
+        rows.sort(key=lambda r: (r["last_rate"] or 0), reverse=True)
+        return rows
+
+
+async def get_funding_symbols() -> List[str]:
+    """Return all distinct symbols that have funding rate records."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(distinct(FundingRate.symbol)).order_by(FundingRate.symbol)
+        )
+        return [row[0] for row in result.all()]
 
 
 async def get_recent_funding(symbol: str, limit: int = 90) -> List[FundingRate]:

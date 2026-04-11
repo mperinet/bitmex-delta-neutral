@@ -14,6 +14,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+import ccxt.async_support as ccxt
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -87,6 +88,67 @@ def load_positions():
     } for p in positions])
 
 
+@st.cache_data(ttl=300)
+def load_indicative_rates() -> dict:
+    """
+    Fetch predicted next funding rates from live BitMEX (public endpoint, no auth).
+    Returns a dict keyed by both ccxt symbol and native BitMEX symbol so callers
+    can look up regardless of which format the DB uses.
+    """
+    async def _fetch():
+        exchange = ccxt.bitmex({"enableRateLimit": True})
+        try:
+            rates = await exchange.fetch_funding_rates()
+        finally:
+            await exchange.close()
+        lookup = {}
+        for ccxt_sym, data in rates.items():
+            rate = data.get("nextFundingRate")
+            lookup[ccxt_sym] = rate
+            native = (data.get("info") or {}).get("symbol")
+            if native:
+                lookup[native] = rate
+        return lookup
+
+    return run_async(_fetch())
+
+
+@st.cache_data(ttl=30)
+def load_funding_summary():
+    from engine.db import repository
+    rows = run_async(repository.get_funding_summary())
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    for col in ("last_rate", "avg_10d"):
+        df[col] = df[col] * 100  # → %
+    df.drop(columns=["predicted_rate"], inplace=True)
+    return df
+
+
+@st.cache_data(ttl=60)
+def load_funding_symbols() -> list:
+    from engine.db import repository
+    symbols = run_async(repository.get_funding_symbols())
+    return symbols or ["BTC/USD:BTC", "ETH/USD:BTC"]
+
+
+@st.cache_data(ttl=60)
+def load_daily_funding_avg(symbol: str, days: int = 90):
+    from engine.db import repository
+    # Fetch enough 8h records to cover `days` of history (3 records/day)
+    rates = run_async(repository.get_recent_funding(symbol, limit=days * 3))
+    if not rates:
+        return pd.DataFrame()
+    df = pd.DataFrame([{
+        "date": r.timestamp.date(),
+        "rate": r.funding_rate * 100,  # %/8h
+    } for r in rates])
+    daily = df.groupby("date")["rate"].mean().reset_index()
+    daily.columns = ["date", "avg_rate_pct"]
+    return daily.sort_values("date")
+
+
 @st.cache_data(ttl=5)
 def load_funding_rates(symbol: str, limit: int = 90):
     from engine.db import repository
@@ -153,7 +215,7 @@ if page == "Live Positions":
     if positions_df.empty:
         st.info("No open positions. Engine may not be running or no signals yet.")
     else:
-        st.dataframe(positions_df, use_container_width=True)
+        st.dataframe(positions_df, width="stretch")
 
         # PnL summary
         total_pnl = positions_df["unrealised_pnl"].sum()
@@ -167,29 +229,68 @@ if page == "Live Positions":
 
 elif page == "Funding Rates":
     st.title("Funding Rates")
-    symbol = st.selectbox("Symbol", ["BTC/USD:BTC", "ETH/USD:BTC"])
-    df = load_funding_rates(symbol)
 
-    if df.empty:
+    summary = load_funding_summary()
+    indicative = load_indicative_rates()  # live from BitMEX public API
+
+    if not summary.empty:
+        st.subheader("All symbols")
+
+        def _fmt(v):
+            return f"{v:.4f}%" if pd.notna(v) and v is not None else "—"
+
+        def _predicted(sym):
+            rate = indicative.get(sym)
+            if rate is None:
+                return "—"
+            pct = rate * 100
+            ann = rate * 3 * 365 * 100
+            return f"{pct:.4f}% ({ann:.0f}% ann.)"
+
+        display = pd.DataFrame({
+            "Symbol": summary["symbol"],
+            "Last rate (/8h)": summary["last_rate"].map(_fmt),
+            "Predicted next (/8h)": summary["symbol"].map(_predicted),
+            "10d daily avg (/8h)": summary["avg_10d"].map(_fmt),
+        })
+        st.dataframe(display, width="stretch", hide_index=True)
+
+    st.subheader("Daily average")
+    symbol = st.selectbox("Symbol", load_funding_symbols())
+    days = st.slider("Days of history", min_value=7, max_value=180, value=90, step=7)
+    daily = load_daily_funding_avg(symbol, days=days)
+
+    if daily.empty:
         st.info(f"No funding rate data for {symbol}. Run the backfill script or wait for the engine to collect data.")
     else:
-        latest_rate = df["rate"].iloc[-1]
-        avg_rate = df["rate"].mean()
+        overall_avg = daily["avg_rate_pct"].mean()
         col1, col2, col3 = st.columns(3)
-        col1.metric("Latest Rate", f"{latest_rate:.4f}%/8h")
-        col2.metric("90-period Average", f"{avg_rate:.4f}%/8h")
-        col3.metric("Annualised (avg)", f"{avg_rate * 3 * 365:.1f}%")
+        col1.metric("Days shown", len(daily))
+        col2.metric("Overall avg rate", f"{overall_avg:.4f}%/8h")
+        col3.metric("Annualised (avg)", f"{overall_avg * 3 * 365:.1f}%")
+
+        daily["annualised"] = daily["avg_rate_pct"] * 3 * 365
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df["timestamp"], y=df["rate"],
-            name="Funding Rate %/8h",
-            line=dict(color="#00cc96"),
+        fig.add_trace(go.Bar(
+            x=daily["date"],
+            y=daily["avg_rate_pct"],
+            name="Daily avg funding %/8h",
+            marker_color=["#ef553b" if v < 0 else "#00cc96" for v in daily["avg_rate_pct"]],
+            customdata=daily["annualised"],
+            hovertemplate="%{x}<br>Annualised: %{customdata:.1f}%<extra></extra>",
         ))
+        fig.add_hline(y=0, line_dash="solid", line_color="white", line_width=0.5)
         fig.add_hline(y=0.01, line_dash="dash", line_color="orange", annotation_text="Baseline (0.01%)")
         fig.add_hline(y=0.03, line_dash="dash", line_color="red", annotation_text="Entry threshold (0.03%)")
-        fig.update_layout(title=f"{symbol} Funding Rate History", xaxis_title="Time", yaxis_title="Rate (%/8h)")
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(
+            title=f"{symbol} — Daily Average Funding Rate",
+            xaxis_title="Date",
+            yaxis_title="Avg rate (%/8h)",
+            yaxis_range=[daily["avg_rate_pct"].min() * 1.1 if daily["avg_rate_pct"].min() < 0 else -0.05, 0.5],
+            bargap=0.2,
+        )
+        st.plotly_chart(fig, width="stretch")
 
 elif page == "Risk":
     st.title("Risk")
@@ -216,7 +317,7 @@ elif page == "Risk":
         fig.add_hline(y=40, line_dash="dash", line_color="orange", annotation_text="Warning (40%)")
         fig.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="Hard stop (50%)")
         fig.update_layout(title="Margin Utilization Over Time", yaxis_range=[0, 60])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 elif page == "Smoke Test":
     st.title("Smoke Test")
@@ -260,7 +361,7 @@ elif page == "Smoke Test":
                 "opened": p.opened_at,
                 "closed": p.closed_at or "—",
             } for p in positions]),
-            use_container_width=True,
+            width="stretch",
         )
 
     # Signal history
@@ -273,7 +374,7 @@ elif page == "Smoke Test":
                 "consumed_at": s.consumed_at,
                 "status": "pending" if s.consumed_at is None else "consumed",
             } for s in signals]),
-            use_container_width=True,
+            width="stretch",
         )
 
 # Auto-refresh

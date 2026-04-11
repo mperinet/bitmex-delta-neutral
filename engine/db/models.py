@@ -14,6 +14,7 @@ Table overview:
   positions       — current open positions, one row per strategy+leg
   trades          — fill history (entry/exit, both legs)
   risk_snapshots  — periodic delta/margin snapshots for audit trail
+  control_signals — one-shot commands written by the dashboard, consumed by the engine
 """
 
 from datetime import datetime
@@ -170,6 +171,29 @@ class RiskSnapshot(Base):
 
     __table_args__ = (
         Index("ix_risk_ts", "timestamp"),
+    )
+
+
+class ControlSignal(Base):
+    """
+    One-shot command written by the dashboard, consumed by the engine.
+
+    Workflow:
+      1. Dashboard writes a row with consumed_at=None.
+      2. Engine checks for pending rows each loop tick.
+      3. Engine sets consumed_at when it acts on the signal.
+
+    Currently supported signals: "smoke_test"
+    """
+    __tablename__ = "control_signals"
+
+    id = Column(Integer, primary_key=True)
+    signal = Column(String(32), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    consumed_at = Column(DateTime, nullable=True)   # None = pending
+
+    __table_args__ = (
+        Index("ix_control_signals_pending", "signal", "consumed_at"),
     )
 
 

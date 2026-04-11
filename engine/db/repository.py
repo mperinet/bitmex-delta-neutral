@@ -11,10 +11,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from engine.db.models import (
+    ControlSignal,
     FundingRate,
     Instrument,
     Position,
@@ -172,6 +173,67 @@ async def record_trade(
 # ---------------------------------------------------------------------------
 # Risk snapshots
 # ---------------------------------------------------------------------------
+
+async def get_positions_by_strategy(strategy: str, limit: int = 10) -> List[Position]:
+    """Return recent positions for a strategy (all states, newest first)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Position)
+            .where(Position.strategy == strategy)
+            .order_by(Position.opened_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# Control signals
+# ---------------------------------------------------------------------------
+
+async def create_control_signal(signal: str) -> ControlSignal:
+    async with get_session() as session:
+        sig = ControlSignal(signal=signal)
+        session.add(sig)
+        await session.commit()
+        await session.refresh(sig)
+        return sig
+
+
+async def get_pending_control_signal(signal: str) -> Optional[ControlSignal]:
+    """Return the oldest unconsumed signal of this type, or None."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(ControlSignal)
+            .where(and_(
+                ControlSignal.signal == signal,
+                ControlSignal.consumed_at.is_(None),
+            ))
+            .order_by(ControlSignal.created_at.asc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def consume_control_signal(signal_id: int) -> None:
+    async with get_session() as session:
+        await session.execute(
+            update(ControlSignal)
+            .where(ControlSignal.id == signal_id)
+            .values(consumed_at=datetime.utcnow())
+        )
+        await session.commit()
+
+
+async def get_recent_control_signals(signal: str, limit: int = 10) -> List[ControlSignal]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(ControlSignal)
+            .where(ControlSignal.signal == signal)
+            .order_by(ControlSignal.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
 
 async def save_risk_snapshot(
     net_delta_usd: float,

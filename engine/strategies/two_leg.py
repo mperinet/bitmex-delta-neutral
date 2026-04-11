@@ -5,14 +5,20 @@ Shared across Strategy 1 (cash-and-carry) and Strategy 2 (funding harvest).
 Both strategies have:
   - Leg A: short derivative (future or perp)
   - Leg B: long hedge (perp or spot)
-  - Progressive entry (N slices, both legs simultaneously)
+  - Orderbook-aware progressive entry (market orders, one slice per loop tick)
   - Shared exit logic (market orders on both legs)
 
 Subclasses override:
-  - compute_legs(): return (leg_a_symbol, leg_a_side, leg_b_symbol, leg_b_side,
-                            price_a, price_b, qty_a, qty_b, metadata)
+  - compute_entry_spec(): return (leg_a_symbol, leg_a_side, leg_b_symbol, leg_b_side,
+                                  qty_a, qty_b, metadata)
   - should_enter(): strategy-specific signal
   - should_exit(): strategy-specific exit conditions
+
+Entry flow across loop ticks:
+  Tick N   — enter() creates DB record + attempts first slice
+  Tick N+1 — continue_entry() attempts next slice (if still ENTERING)
+  ...
+  Tick N+k — final slice fills, position transitions to ACTIVE
 """
 
 from __future__ import annotations
@@ -32,40 +38,29 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class LegSpec:
     symbol: str
-    side: str      # "buy" | "sell"
-    qty: float
-    price: float
+    side: str   # "buy" | "sell"
+    qty: float  # total target quantity (USD for inverse, base ccy for spot)
 
 
 @dataclass
 class EntrySpec:
     leg_a: LegSpec
     leg_b: LegSpec
-    n_slices: int
-    fill_timeout_s: float
-    metadata: dict  # strategy-specific data to store on the position
+    metadata: dict  # strategy-specific fields stored on the Position row
 
 
 class TwoLegStrategy(Strategy):
     """
     Intermediate base class for two-leg delta-neutral strategies.
-    Handles the mechanics of entry, exit, and state transitions.
-    Subclasses provide the signal logic.
+    Handles entry mechanics (orderbook-sized market slices) and exit.
+    Subclasses provide signal logic and compute_entry_spec().
     """
-
-    @property
-    def n_slices(self) -> int:
-        return self._config.get("entry_slices", 5)
-
-    @property
-    def fill_timeout_s(self) -> float:
-        return self._config.get("slice_fill_timeout_s", 30)
 
     async def compute_entry_spec(self) -> Optional[EntrySpec]:
         """
-        Compute the legs and quantities for a new entry.
+        Compute leg symbols, sides, and total target quantities.
         Subclasses must implement this.
-        Returns None if entry is not possible (e.g., insufficient data).
+        Returns None if entry is not possible (e.g. insufficient balance).
         """
         raise NotImplementedError
 
@@ -74,7 +69,7 @@ class TwoLegStrategy(Strategy):
         if spec is None:
             return None
 
-        # Create DB record before placing orders (stateless strategy requirement)
+        # Create DB record before placing any orders (stateless recovery requirement)
         position = await repository.create_position(
             strategy=self.name,
             leg_a_symbol=spec.leg_a.symbol,
@@ -83,7 +78,7 @@ class TwoLegStrategy(Strategy):
             leg_b_symbol=spec.leg_b.symbol,
             leg_b_side=spec.leg_b.side,
             leg_b_target_qty=spec.leg_b.qty,
-            entry_slices_total=spec.n_slices,
+            entry_slices_total=0,   # dynamic — no fixed slice count
             **spec.metadata,
         )
 
@@ -91,44 +86,43 @@ class TwoLegStrategy(Strategy):
             "strategy_entering",
             strategy=self.name,
             position_id=position.id,
-            leg_a=f"{spec.leg_a.side} {spec.leg_a.qty} {spec.leg_a.symbol} @ {spec.leg_a.price}",
-            leg_b=f"{spec.leg_b.side} {spec.leg_b.qty} {spec.leg_b.symbol} @ {spec.leg_b.price}",
+            leg_a=f"{spec.leg_a.side} {spec.leg_a.qty} {spec.leg_a.symbol}",
+            leg_b=f"{spec.leg_b.side} {spec.leg_b.qty} {spec.leg_b.symbol}",
         )
 
-        success = await self._order_mgr.progressive_entry(
+        # Attempt first slice immediately; remaining slices come on subsequent ticks
+        await self.continue_entry(position)
+        return position.id
+
+    async def continue_entry(self, position: Position) -> None:
+        """
+        Attempt one orderbook-sized market slice on both legs.
+        Called each loop tick while the position is in ENTERING state.
+        Skips silently if orderbook depth is insufficient (tries again next tick).
+        """
+        remaining_a = (position.leg_a_target_qty or 0) - (position.leg_a_qty or 0)
+        remaining_b = (position.leg_b_target_qty or 0) - (position.leg_b_qty or 0)
+
+        filled = await self._order_mgr.fill_next_slice(
             position_id=position.id,
             strategy=self.name,
-            leg_a_symbol=spec.leg_a.symbol,
-            leg_a_side=spec.leg_a.side,
-            leg_b_symbol=spec.leg_b.symbol,
-            leg_b_side=spec.leg_b.side,
-            total_qty_a=spec.leg_a.qty,
-            total_qty_b=spec.leg_b.qty,
-            leg_a_price=spec.leg_a.price,
-            leg_b_price=spec.leg_b.price,
-            n_slices=spec.n_slices,
-            fill_timeout_s=spec.fill_timeout_s,
+            leg_a_symbol=position.leg_a_symbol,
+            leg_a_side=position.leg_a_side,
+            leg_a_remaining=remaining_a,
+            leg_b_symbol=position.leg_b_symbol,
+            leg_b_side=position.leg_b_side,
+            leg_b_remaining=remaining_b,
         )
 
-        if not success:
-            # Progressive entry failed partway through — position may be partially filled.
-            # Mark as IDLE so it doesn't get re-entered automatically.
-            # Operator should review the position.
-            await repository.update_position(position.id, state=PositionState.IDLE)
-            logger.error(
-                "strategy_entry_failed",
+        if not filled:
+            logger.info(
+                "continue_entry_skipped",
                 strategy=self.name,
                 position_id=position.id,
-                action="position_marked_idle_for_review",
+                remaining_a=remaining_a,
+                remaining_b=remaining_b,
+                reason="insufficient_depth",
             )
-            return None
-
-        logger.info(
-            "strategy_entered",
-            strategy=self.name,
-            position_id=position.id,
-        )
-        return position.id
 
     async def exit(self, position: Position) -> bool:
         """

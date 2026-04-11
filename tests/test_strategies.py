@@ -134,8 +134,6 @@ class TestFundingHarvestStrategy:
                 "min_funding_rate": 0.0001,
                 "entry_threshold_multiplier": 3,
                 "max_position_usd": 10000,
-                "entry_slices": 5,
-                "slice_fill_timeout_s": 30,
             },
         )
 

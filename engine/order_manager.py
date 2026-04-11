@@ -1,5 +1,5 @@
 """
-Order manager with rate-limit token bucket and progressive entry.
+Order manager with rate-limit token bucket and orderbook-aware progressive entry.
 
 Rate limit: 300 requests per 5-minute window (BitMEX).
   - Token bucket initialized from X-RateLimit-Remaining on startup
@@ -8,45 +8,37 @@ Rate limit: 300 requests per 5-minute window (BitMEX).
   - Normal strategy orders draw from the shared bucket.
   - Emergency operations (cancel, dead-man's switch) draw from reserve.
 
-Progressive entry (two-leg):
-  Entry is divided into N slices. For each slice:
-    1. Place leg A slice
-    2. Wait for fill (timeout = slice_fill_timeout_s)
-    3. Place leg B slice
-    4. Wait for fill
-    5. If either times out: unwind the filled half, stop entry
-    6. If both fill: update DB state, proceed to next slice
+Progressive entry (two-leg, market orders):
+  Each call to fill_next_slice() places ONE slice on both legs simultaneously.
+  Slice size is determined by orderbook depth within max_slippage_pct:
 
-  Max orphan exposure = 1/N of total notional (1 slice worst case).
+    1. Fetch orderbook for both legs
+    2. Compute available qty within slippage on each leg's consuming side
+    3. If either leg has insufficient depth → skip this tick (return False)
+    4. Size the slice to the most constrained leg, keeping both proportional
+    5. Place market orders on leg A then leg B
+    6. If leg B fails: immediately unwind leg A (market order, emergency)
+    7. Record fills and update position DB state
+    8. If target qty reached → transition position to ACTIVE
 
-ASCII flow:
+  fill_next_slice() is called once per loop tick per ENTERING position,
+  by TwoLegStrategy.continue_entry() which is called from Strategy.run_once().
 
-  for slice in range(N):
-      place leg_a slice ──► fill? ──► NO ──► abort (no leg_b needed)
-                │
-                YES
-                │
-      place leg_b slice ──► fill? ──► NO ──► cancel/close leg_a slice, abort
-                │
-                YES
-                │
-      record_trade (both legs)
-      update DB (entry_slices_done += 1)
-      ├── all N done? → position.state = ACTIVE
-      └── continue
+Orphan risk: at most one slice (one market order on leg A) if leg B API call fails.
+Market orders fill in milliseconds, so the orphan window is ~100ms.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import structlog
 
 from engine.db import repository
-from engine.exchange.base import ExchangeBase, OrderResult
+from engine.db.models import PositionState
+from engine.exchange.base import ExchangeBase, OrderBook, OrderResult
 
 logger = structlog.get_logger(__name__)
 
@@ -101,17 +93,16 @@ class RateLimitBucket:
         return self._tokens
 
 
-@dataclass
-class SliceFillTimeout(Exception):
-    leg: str
-    symbol: str
-    order_id: str
-
-
 class OrderManager:
-    def __init__(self, exchange: ExchangeBase, bucket: RateLimitBucket):
+    def __init__(
+        self,
+        exchange: ExchangeBase,
+        bucket: RateLimitBucket,
+        max_slippage: float = 0.001,
+    ):
         self._exchange = exchange
         self._bucket = bucket
+        self._max_slippage = max_slippage
 
     # ------------------------------------------------------------------
     # Single order placement
@@ -149,6 +140,8 @@ class OrderManager:
             side=side,
             qty=qty,
             order_id=result.order_id,
+            filled=result.filled_qty,
+            avg_price=result.avg_price,
         )
         return result
 
@@ -165,142 +158,120 @@ class OrderManager:
         return count
 
     # ------------------------------------------------------------------
-    # Progressive entry (two-leg, N slices)
+    # Orderbook-aware progressive entry
     # ------------------------------------------------------------------
 
-    async def progressive_entry(
+    async def fill_next_slice(
         self,
         position_id: int,
         strategy: str,
-        leg_a_symbol: str,
-        leg_a_side: str,          # "buy" | "sell"
-        leg_b_symbol: str,
-        leg_b_side: str,
-        total_qty_a: float,
-        total_qty_b: float,
-        leg_a_price: float,
-        leg_b_price: float,
-        n_slices: int,
-        fill_timeout_s: float,
-    ) -> bool:
-        """
-        Enter both legs simultaneously in N equal slices.
-
-        Returns True if all slices filled successfully.
-        Returns False if any slice failed (orphan unwound automatically).
-
-        On failure, the position state is NOT updated to ACTIVE —
-        caller should handle the partial state.
-        """
-        slice_qty_a = total_qty_a / n_slices
-        slice_qty_b = total_qty_b / n_slices
-
-        for slice_idx in range(n_slices):
-            success = await self._enter_one_slice(
-                position_id=position_id,
-                strategy=strategy,
-                slice_idx=slice_idx,
-                leg_a_symbol=leg_a_symbol,
-                leg_a_side=leg_a_side,
-                leg_b_symbol=leg_b_symbol,
-                leg_b_side=leg_b_side,
-                qty_a=slice_qty_a,
-                qty_b=slice_qty_b,
-                price_a=leg_a_price,
-                price_b=leg_b_price,
-                fill_timeout_s=fill_timeout_s,
-            )
-            if not success:
-                logger.warning(
-                    "progressive_entry_aborted",
-                    position_id=position_id,
-                    strategy=strategy,
-                    slices_completed=slice_idx,
-                )
-                return False
-
-        return True
-
-    async def _enter_one_slice(
-        self,
-        position_id: int,
-        strategy: str,
-        slice_idx: int,
         leg_a_symbol: str,
         leg_a_side: str,
+        leg_a_remaining: float,
         leg_b_symbol: str,
         leg_b_side: str,
-        qty_a: float,
-        qty_b: float,
-        price_a: float,
-        price_b: float,
-        fill_timeout_s: float,
+        leg_b_remaining: float,
     ) -> bool:
-        # Place leg A
-        order_a = await self.place_limit(leg_a_symbol, leg_a_side, qty_a, price_a)
-        filled_a = await self._wait_for_fill(order_a.order_id, leg_a_symbol, fill_timeout_s)
-        if not filled_a:
-            logger.warning(
-                "slice_leg_a_timeout",
-                slice=slice_idx,
-                order_id=order_a.order_id,
-                symbol=leg_a_symbol,
-            )
-            # No leg B placed yet — just cancel leg A (may already be dead)
-            await self.cancel(order_a.order_id, leg_a_symbol)
-            return False
+        """
+        Attempt one market-order slice on both legs, sized by orderbook depth.
 
-        # Place leg B
-        order_b = await self.place_limit(leg_b_symbol, leg_b_side, qty_b, price_b)
-        filled_b = await self._wait_for_fill(order_b.order_id, leg_b_symbol, fill_timeout_s)
-        if not filled_b:
-            logger.warning(
-                "slice_leg_b_timeout",
-                slice=slice_idx,
-                order_id=order_b.order_id,
-                symbol=leg_b_symbol,
-            )
-            # Unwind leg A: place opposing market order
-            unwind_side = "sell" if leg_a_side == "buy" else "buy"
-            await self.place_market(leg_a_symbol, unwind_side, qty_a, emergency=True)
-            await self.cancel(order_b.order_id, leg_b_symbol)
+        Returns True  — slice placed (or position already fully filled).
+        Returns False — insufficient depth on at least one leg; try next tick.
+
+        On leg B failure, leg A is immediately unwound (market order, emergency).
+        """
+        # Already fully filled — just ensure state is ACTIVE
+        if leg_a_remaining <= 0 and leg_b_remaining <= 0:
+            await repository.update_position(position_id, state=PositionState.ACTIVE)
+            return True
+
+        # Fetch orderbooks for both legs (market data, not counted against trade bucket)
+        ob_a = await self._exchange.fetch_orderbook(leg_a_symbol)
+        ob_b = await self._exchange.fetch_orderbook(leg_b_symbol)
+
+        mid_a = self._mid(ob_a)
+        mid_b = self._mid(ob_b)
+
+        depth_a = self._available_qty(ob_a, leg_a_side, mid_a, self._max_slippage)
+        depth_b = self._available_qty(ob_b, leg_b_side, mid_b, self._max_slippage)
+
+        if depth_a <= 0 or depth_b <= 0:
             logger.info(
-                "slice_leg_a_unwound",
-                slice=slice_idx,
-                symbol=leg_a_symbol,
-                qty=qty_a,
+                "fill_next_slice_insufficient_depth",
+                position_id=position_id,
+                leg_a=leg_a_symbol,
+                depth_a=depth_a,
+                leg_b=leg_b_symbol,
+                depth_b=depth_b,
+                max_slippage=self._max_slippage,
             )
             return False
 
-        # Both legs filled — record trades and update DB
-        final_a = await self._exchange.get_order(order_a.order_id, leg_a_symbol)
-        final_b = await self._exchange.get_order(order_b.order_id, leg_b_symbol)
+        # Size each leg: capped by available depth, then aligned to the more
+        # constrained leg so both legs always move by the same fraction of remaining.
+        fill_a = min(leg_a_remaining, depth_a)
+        fill_b = min(leg_b_remaining, depth_b)
+        ratio = min(fill_a / leg_a_remaining, fill_b / leg_b_remaining)
+        fill_a = leg_a_remaining * ratio
+        fill_b = leg_b_remaining * ratio
 
+        logger.info(
+            "fill_next_slice_placing",
+            position_id=position_id,
+            leg_a=f"{leg_a_side} {fill_a:.2f} {leg_a_symbol}",
+            leg_b=f"{leg_b_side} {fill_b:.4f} {leg_b_symbol}",
+            depth_a=depth_a,
+            depth_b=depth_b,
+            ratio=ratio,
+        )
+
+        # Place leg A
+        order_a = await self.place_market(leg_a_symbol, leg_a_side, fill_a)
+
+        # Place leg B — unwind A immediately on failure
+        try:
+            order_b = await self.place_market(leg_b_symbol, leg_b_side, fill_b)
+        except Exception as exc:
+            logger.error(
+                "fill_next_slice_leg_b_failed_unwinding_a",
+                position_id=position_id,
+                error=str(exc),
+            )
+            unwind_side = "sell" if leg_a_side == "buy" else "buy"
+            await self.place_market(leg_a_symbol, unwind_side, order_a.filled_qty, emergency=True)
+            raise
+
+        # Record fills
         await repository.record_trade(
-            position_id, strategy, "a", final_a.order_id,
-            leg_a_symbol, leg_a_side, final_a.filled_qty, final_a.avg_price,
-            final_a.fee, is_entry=True,
+            position_id, strategy, "a", order_a.order_id,
+            leg_a_symbol, leg_a_side, order_a.filled_qty, order_a.avg_price,
+            order_a.fee, is_entry=True,
         )
         await repository.record_trade(
-            position_id, strategy, "b", final_b.order_id,
-            leg_b_symbol, leg_b_side, final_b.filled_qty, final_b.avg_price,
-            final_b.fee, is_entry=True,
+            position_id, strategy, "b", order_b.order_id,
+            leg_b_symbol, leg_b_side, order_b.filled_qty, order_b.avg_price,
+            order_b.fee, is_entry=True,
         )
 
+        # Update position quantities and state
         pos = await repository.get_position(position_id)
         if pos:
-            new_qty_a = (pos.leg_a_qty or 0) + final_a.filled_qty
-            new_qty_b = (pos.leg_b_qty or 0) + final_b.filled_qty
-            slices_done = (pos.entry_slices_done or 0) + 1
+            new_qty_a = (pos.leg_a_qty or 0) + order_a.filled_qty
+            new_qty_b = (pos.leg_b_qty or 0) + order_b.filled_qty
             new_avg_a = self._running_avg(
                 pos.leg_a_avg_entry, pos.leg_a_qty or 0,
-                final_a.avg_price, final_a.filled_qty
+                order_a.avg_price, order_a.filled_qty,
             )
             new_avg_b = self._running_avg(
                 pos.leg_b_avg_entry, pos.leg_b_qty or 0,
-                final_b.avg_price, final_b.filled_qty
+                order_b.avg_price, order_b.filled_qty,
             )
-            from engine.db.models import PositionState
+            slices_done = (pos.entry_slices_done or 0) + 1
+
+            new_remaining_a = (pos.leg_a_target_qty or 0) - new_qty_a
+            new_remaining_b = (pos.leg_b_target_qty or 0) - new_qty_b
+            fully_filled = new_remaining_a <= 0 and new_remaining_b <= 0
+
             await repository.update_position(
                 position_id,
                 leg_a_qty=new_qty_a,
@@ -308,26 +279,53 @@ class OrderManager:
                 leg_a_avg_entry=new_avg_a,
                 leg_b_avg_entry=new_avg_b,
                 entry_slices_done=slices_done,
-                state=PositionState.ACTIVE if slices_done >= pos.entry_slices_total
-                      else PositionState.ENTERING,
+                state=PositionState.ACTIVE if fully_filled else PositionState.ENTERING,
+            )
+
+            logger.info(
+                "fill_next_slice_done",
+                position_id=position_id,
+                slices_done=slices_done,
+                remaining_a=new_remaining_a,
+                remaining_b=new_remaining_b,
+                state="ACTIVE" if fully_filled else "ENTERING",
             )
 
         return True
 
-    async def _wait_for_fill(
-        self, order_id: str, symbol: str, timeout_s: float, poll_interval: float = 1.0
-    ) -> bool:
-        """Poll order status until filled or timeout."""
-        deadline = asyncio.get_event_loop().time() + timeout_s
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(poll_interval)
-            await self._bucket.acquire()
-            order = await self._exchange.get_order(order_id, symbol)
-            if order.status == "closed":
-                return True
-            if order.status == "canceled":
-                return False
-        return False
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mid(ob: OrderBook) -> float:
+        best_bid = ob.bids[0][0] if ob.bids else 0.0
+        best_ask = ob.asks[0][0] if ob.asks else 0.0
+        return (best_bid + best_ask) / 2
+
+    @staticmethod
+    def _available_qty(
+        ob: OrderBook,
+        side: str,
+        mid_price: float,
+        max_slippage: float,
+    ) -> float:
+        """
+        Cumulative quantity available within slippage of mid price.
+
+        Buy  → consuming asks: sum qty where ask_price <= mid * (1 + slippage)
+        Sell → consuming bids: sum qty where bid_price >= mid * (1 - slippage)
+
+        Qty units match the instrument (USD for inverse contracts, base ccy for spot).
+        """
+        if mid_price <= 0:
+            return 0.0
+        if side == "buy":
+            limit = mid_price * (1 + max_slippage)
+            return sum(qty for price, qty in ob.asks if price <= limit)
+        else:
+            limit = mid_price * (1 - max_slippage)
+            return sum(qty for price, qty in ob.bids if price >= limit)
 
     @staticmethod
     def _running_avg(

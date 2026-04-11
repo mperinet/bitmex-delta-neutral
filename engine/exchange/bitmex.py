@@ -24,7 +24,7 @@ from typing import Optional
 
 import ccxt.async_support as ccxt
 
-from engine.exchange.base import Balance, ExchangeBase, OrderResult, Ticker
+from engine.exchange.base import Balance, ExchangeBase, OrderBook, OrderResult, Ticker
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,10 @@ class BitMEXExchange(ExchangeBase):
         """Return raw position data for WS reconnect reconciliation."""
         positions = await self._ccxt.fetch_positions()
         return [p for p in positions if p.get("contracts", 0) != 0]
+
+    async def fetch_orderbook(self, symbol: str, depth: int = 25) -> OrderBook:
+        raw = await self._ccxt.fetch_order_book(symbol, limit=depth)
+        return OrderBook(symbol=symbol, bids=raw["bids"], asks=raw["asks"])
 
     # ------------------------------------------------------------------
     # BitMEX-specific: funding rates and settlement

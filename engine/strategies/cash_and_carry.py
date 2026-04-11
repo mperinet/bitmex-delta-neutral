@@ -159,20 +159,8 @@ class CashAndCarryStrategy(TwoLegStrategy):
         perp_qty = usd_notional       # USD contracts on the perp
 
         return EntrySpec(
-            leg_a=LegSpec(
-                symbol=future_symbol,
-                side="sell",                              # short the future
-                qty=future_qty,
-                price=future_price * 0.9999,
-            ),
-            leg_b=LegSpec(
-                symbol=PERP_SYMBOL,
-                side="buy",                               # long the perp
-                qty=perp_qty,
-                price=perp_ticker.ask * 1.0001,
-            ),
-            n_slices=self.n_slices,
-            fill_timeout_s=self.fill_timeout_s,
+            leg_a=LegSpec(symbol=future_symbol, side="sell", qty=future_qty),
+            leg_b=LegSpec(symbol=PERP_SYMBOL, side="buy", qty=perp_qty),
             metadata={
                 "locked_basis": locked_basis,
                 "expiry": expiry,

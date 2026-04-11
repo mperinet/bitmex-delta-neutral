@@ -44,6 +44,13 @@ class Balance:
     currency: str
 
 
+@dataclass
+class OrderBook:
+    symbol: str
+    bids: list  # [[price, qty], ...] descending — qty in instrument's native units
+    asks: list  # [[price, qty], ...] ascending
+
+
 class ExchangeBase(ABC):
     """
     Thin ccxt wrapper for order placement and ticker data.
@@ -96,4 +103,9 @@ class ExchangeBase(ABC):
     @abstractmethod
     async def get_open_positions(self) -> list[dict]:
         """Return raw exchange position data for reconciliation."""
+        ...
+
+    @abstractmethod
+    async def fetch_orderbook(self, symbol: str, depth: int = 25) -> OrderBook:
+        """Return order book for slippage-aware slice sizing."""
         ...

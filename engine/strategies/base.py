@@ -72,6 +72,13 @@ class Strategy(ABC):
         """Called when a funding payment is received or paid. Override to update state."""
         pass
 
+    async def continue_entry(self, position: Position) -> None:
+        """
+        Called each tick while a position is in ENTERING state.
+        TwoLegStrategy overrides this to attempt the next orderbook-sized slice.
+        """
+        pass
+
     async def run_once(self) -> None:
         """
         Single strategy iteration. Called by the engine's main loop.
@@ -79,6 +86,7 @@ class Strategy(ABC):
         check-and-act cycle so the event loop stays responsive.
         """
         from engine.db import repository
+        from engine.db.models import PositionState
 
         # Wait for position tracker to be ready (handles WS reconnect)
         await self._tracker.wait_ready()
@@ -92,10 +100,12 @@ class Strategy(ABC):
         # Check existing positions
         open_positions = await repository.get_open_positions(strategy=self.name)
         for pos in open_positions:
-            if await self.should_exit(pos):
+            if pos.state == PositionState.ENTERING:
+                await self.continue_entry(pos)
+            elif await self.should_exit(pos):
                 await self.exit(pos)
 
-        # Try to enter if no active position and conditions are met
+        # Try to enter if no open position and conditions are met
         if not open_positions and await self.should_enter():
             if margin_result.action != RiskAction.WARNING:
                 await self.enter()

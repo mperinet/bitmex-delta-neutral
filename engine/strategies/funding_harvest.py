@@ -114,20 +114,8 @@ class FundingHarvestStrategy(TwoLegStrategy):
         spot_qty = usd_notional / spot_ticker.ask           # BTC to buy
 
         return EntrySpec(
-            leg_a=LegSpec(
-                symbol=PERP_SYMBOL,
-                side="sell",                                # short the perp
-                qty=perp_qty,
-                price=perp_ticker.bid * 0.9999,            # just below bid (post-only)
-            ),
-            leg_b=LegSpec(
-                symbol=SPOT_SYMBOL,
-                side="buy",                                 # buy spot
-                qty=spot_qty,
-                price=spot_ticker.ask * 1.0001,            # just above ask (post-only)
-            ),
-            n_slices=self.n_slices,
-            fill_timeout_s=self.fill_timeout_s,
+            leg_a=LegSpec(symbol=PERP_SYMBOL, side="sell", qty=perp_qty),
+            leg_b=LegSpec(symbol=SPOT_SYMBOL, side="buy", qty=spot_qty),
             metadata={},
         )
 

@@ -15,7 +15,8 @@ tomli==2.0.1
 python-dotenv==1.0.1
 
 # Dashboard
-streamlit==1.35.0
+streamlit==1.56.0
+protobuf==7.34.1
 pandas==2.2.2
 plotly==5.22.0
 

@@ -1,0 +1,37 @@
+[exchange]
+primary = "bitmex"
+testnet = true                 # flip to false for live capital
+
+[database]
+url = "sqlite+aiosqlite:///data/trading.db"
+
+[risk]
+max_delta_pct_nav = 0.005      # 0.5% of NAV — trigger rebalance above this
+max_margin_utilization = 0.50  # 50% hard cap
+dead_mans_switch_interval_s = 15
+dead_mans_switch_timeout_s = 60
+dead_mans_switch_reconnect_timeout_s = 120   # extended during WS reconnect
+liquidation_buffer_pct = 0.10  # reduce position if within 10% of liquidation
+rate_limit_per_5min = 300
+rate_limit_emergency_reserve = 20            # tokens strategies cannot drain
+
+[strategy.cash_and_carry]
+enabled = true
+min_basis_annualised = 0.10    # 10% APR minimum to enter
+funding_circuit_breaker = 0.50 # exit when cumulative funding = 50% of locked basis
+max_position_usd = 10000
+entry_slices = 5               # progressive entry: N slices per leg
+slice_fill_timeout_s = 30      # seconds to wait for a slice fill before aborting
+
+[strategy.funding_harvest]
+enabled = true
+min_funding_rate = 0.0001      # 0.01%/8h minimum to enter (the structural baseline)
+entry_threshold_multiplier = 3 # enter when funding > 3x baseline (0.03%/8h)
+max_position_usd = 10000
+entry_slices = 5
+slice_fill_timeout_s = 30
+
+[notifications]
+telegram_enabled = false
+telegram_token = ""
+telegram_chat_id = ""

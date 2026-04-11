@@ -1,0 +1,21 @@
+[Unit]
+Description=BitMEX Delta-Neutral Trading Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/bitmex-delta-neutral
+ExecStart=/path/to/bitmex-delta-neutral/.venv/bin/python engine/main.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bitmex-engine
+
+# Give the process 60s to shut down gracefully (dead-man's switch window)
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

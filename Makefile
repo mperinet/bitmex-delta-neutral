@@ -1,8 +1,14 @@
-.PHONY: setup test backfill engine dashboard
+.PHONY: setup install test lint backfill engine dashboard
 
-# Restore tracked config files that get wiped between sessions
+# Create venv and install dependencies (run once after clone)
+install:
+	python3 -m venv .venv
+	.venv/bin/pip install -r requirements.txt
+
+# Restore tracked config files only if missing (does NOT overwrite local edits)
 setup:
-	git checkout HEAD -- config/settings.toml config/.env.example
+	@test -f config/settings.toml || git checkout HEAD -- config/settings.toml
+	@test -f config/.env.example  || git checkout HEAD -- config/.env.example
 	@if [ ! -f config/.env ]; then \
 		echo ""; \
 		echo "WARNING: config/.env is missing. Create it with your testnet credentials:"; \
@@ -12,6 +18,9 @@ setup:
 
 test:
 	PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
+
+lint:
+	.venv/bin/python -m ruff check engine/ dashboard/ tests/ || true
 
 backfill-btc:
 	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "BTC/USD:BTC" --limit 500

@@ -139,9 +139,9 @@ class TwoLegStrategy(Strategy):
 
         await repository.update_position(position.id, state=PositionState.EXITING)
 
-        # Close leg A (reverse the side)
+        # Close leg A (reverse the side: entry was "sell" → exit is "buy", and vice versa)
         if position.leg_a_qty and position.leg_a_qty > 0:
-            exit_side_a = "buy" if position.leg_a_side == "short" else "sell"
+            exit_side_a = "buy" if position.leg_a_side == "sell" else "sell"
             order_a = await self._order_mgr.place_market(
                 position.leg_a_symbol, exit_side_a, position.leg_a_qty, emergency=True
             )
@@ -153,7 +153,7 @@ class TwoLegStrategy(Strategy):
 
         # Close leg B
         if position.leg_b_qty and position.leg_b_qty > 0:
-            exit_side_b = "buy" if position.leg_b_side == "short" else "sell"
+            exit_side_b = "buy" if position.leg_b_side == "sell" else "sell"
             order_b = await self._order_mgr.place_market(
                 position.leg_b_symbol, exit_side_b, position.leg_b_qty, emergency=True
             )

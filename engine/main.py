@@ -55,12 +55,26 @@ async def run(config: dict) -> None:
     await init_db(db_url)
     logger.info("database_initialised", url=db_url)
 
+    # -- Credentials check --
+    api_key = os.environ.get("BITMEX_API_KEY")
+    api_secret = os.environ.get("BITMEX_API_SECRET")
+    if not api_key or not api_secret:
+        sys.exit(
+            "ERROR: BITMEX_API_KEY / BITMEX_API_SECRET not set.\n"
+            "  Copy config/.env.example → config/.env and fill in your keys.\n"
+            "  Testnet keys: https://testnet.bitmex.com/app/apiKeys"
+        )
+
+    testnet = config["exchange"].get("testnet", True)
+    if not testnet:
+        logger.warning("LIVE_TRADING_MODE — not testnet. Real capital at risk.")
+
     # -- Exchange --
     from engine.exchange.bitmex import BitMEXExchange
     exchange = BitMEXExchange(
-        api_key=os.environ["BITMEX_API_KEY"],
-        api_secret=os.environ["BITMEX_API_SECRET"],
-        testnet=config["exchange"].get("testnet", True),
+        api_key=api_key,
+        api_secret=api_secret,
+        testnet=testnet,
     )
 
     # -- Rate limit bucket (seeded from exchange headers on startup) --

@@ -1,4 +1,5 @@
 
+<!-- /autoplan restore point: /Users/mperinet/.gstack/projects/mperinet-bitmex-delta-neutral/main-autoplan-restore-20260411-234135.md -->
 /
 I want to build an automated trading system. Your research should use BitMEX official documentation and API. You should pick the best software foundation to run the system locally. It should consist of a core trading engine and an isolated market opportunity analysis dashboard that save and expose the available trading strategies. Only the engine actually run them. Core of the system is arbitrage and carry trading : delta neutral exposure, no directional positioning. It could be a selling a future contract at a premium compare to the spot and buying the same amount of the perpetual contract because the expected funding rates paid should lower on the long run that the future contract premium at expiry. This only an example you should find other credible strategies. I want you to explore that and produce a plan for the system and insights on what can be done.
 
@@ -502,13 +503,97 @@ bitmex-delta-neutral/
  
 *This plan is based on research from BitMEX's official API documentation, their perpetual contracts guide, futures guide, WebSocket API reference, fee schedules, and their Q3 2025 derivatives report on funding rate structure. All strategies should be validated on BitMEX testnet before any live capital is deployed.*
 
+---
+
+## /autoplan Review — Phase 1: CEO Review
+
+**Mode:** SELECTIVE EXPANSION | **Score:** 6.5/10 | **Voices:** [subagent-only] (Codex sandbox failure)
+
+### Premises
+
+| Premise | Status |
+|---|---|
+| BitMEX as primary venue | ACCEPTED |
+| Delta-neutral strategies structurally sound | ACCEPTED |
+| Python/asyncio/SQLite stack | ACCEPTED — right call |
+| Net yield 5-15% APR (Strategy 1) | UNVALIDATED — no backtest |
+| Funding positive 92% = edge | WEAK — also the cost of perp-long leg |
+| Delta-neutral = zero risk | IMPRECISE — BTC exposure drifts in inverse contracts |
+
+### Dream State
+```
+CURRENT: S1+S2 testnet, monitoring dashboard, no backtest, no live criteria
+THIS PLAN: S3 + backtest + live criteria + opportunity scanner + attribution
+12-MONTH: 5 viable strategies live, regime-aware allocation, 30+ days PnL record
+```
+
+### Added to Scope
+1. Backtest harness for S1+S2 on historical DB data
+2. Live deployment criteria document (explicit go/no-go thresholds)
+3. Strategy 3 (Calendar Spread)
+4. Dashboard opportunity scanner (basis monitor + funding z-score ranking)
+5. Performance attribution queries by strategy
+6. `cancelAllAfter` retry handler (open safety item)
+7. S2 negative funding circuit breaker unit test (open safety item)
+8. Delta stress test (30% BTC price move scenario)
+
+### Deferred to TODOS.md
+- Strategy 6 (Multi-Asset Rotation) — after S3 stable
+- Docker/systemd process management
+- Cross-exchange Binance spot (already in TODOS)
+- Strategy 7 (Market Making) — architecture incompatible with 30s loop
+
+### Error & Rescue Registry
+
+| Error | Catcher | Tested |
+|---|---|---|
+| `cancelAllAfter` call fails | NO retry handler | NO |
+| WS disconnect during entry | 120s dead-man extended | PARTIAL |
+| S2 negative funding | Circuit breaker | NO unit test |
+| HARD_STOP during slicing | `unwind()` | PARTIAL |
+| Rate limit exhaustion | Token bucket (20-reserve) | YES |
+
+### Failure Modes Registry
+
+| Mode | Impact | Mitigation Status |
+|---|---|---|
+| Engine crash mid-entry | Stuck ENTERING position | Dead-man cancels orders; manual reconcile |
+| Funding flips negative (S2) | Losses on hedge leg | Circuit breaker exits — test MISSING |
+| Basis collapses early (S1) | Missed early exit | No trigger; expires at 24h-before-expiry |
+| SQLite corruption | DB loss | No backup documented |
+| BitMEX downtime | No trading | Acceptable; positions hedged |
+
+### NOT In Scope
+- Strategy 7 (market making) — incompatible architecture
+- Cross-exchange execution — TODOS.md
+- Prometheus/Grafana — TODOS.md
+- Docker Compose — TODOS.md
+
+### Decision Audit Trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|-------|----------|----------------|-----------|-----------|----------|
+| 1 | CEO | Mode = SELECTIVE EXPANSION | Mechanical | P3 | System built; baseline is bulletproof; audit gaps + surface next | HOLD SCOPE |
+| 2 | CEO | Approach B (validate-first) before A (expand) | Mechanical | P1+P6 | Backtest before expanding strategies | Approach A (expand first) |
+| 3 | CEO | Add backtest harness to scope | Mechanical | P1 | Validates investment thesis; lake to boil | Defer |
+| 4 | CEO | Add live criteria doc to scope | Mechanical | P6 | Action bias; 1 day CC | Defer |
+| 5 | CEO | Add Strategy 3 to scope | Mechanical | P1 | Lowest infra delta next strategy | Defer |
+| 6 | CEO | Defer Strategy 6 | Mechanical | P3 | Depends on S3; TODOS.md already has it | Add |
+| 7 | CEO | Add dashboard opportunity scanner | Mechanical | P1 | Original plan intent; currently underperforms spec | Defer |
+| 8 | CEO | Add performance attribution | Mechanical | P1 | Needed before live; data already in DB | Defer |
+| 9 | CEO | Add cancelAllAfter retry | Mechanical | P1 | Safety-critical open item | Defer |
+| 10 | CEO | Add S2 circuit breaker test | Mechanical | P1 | Safety-critical open item | Defer |
+| 11 | CEO | Add delta stress test | Mechanical | P1 | Unmodeled safety risk; inverse contract nonlinearity | Defer |
+
+---
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 1 | COMPLETE | 8 scope items, 4 deferred |
 | Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | ISSUES_OPEN (PLAN) | 10 issues, 2 critical gaps |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | BUGS_FIXED | 2 critical bugs fixed, 7 medium items, 3 open |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
@@ -516,9 +601,87 @@ bitmex-delta-neutral/
 
 **Implementation architecture:** Lean Structured (Approach C) — single asyncio process, SQLite+SQLAlchemy, Streamlit dashboard, ccxt order layer only, BitMEX-specific funding/margin semantics.
 
-**OPEN ITEMS (resolve before live capital):**
-1. `cancelAllAfter` retry handler when the call itself fails
-2. Strategy 2 negative funding circuit breaker unit test
+---
 
-**VERDICT:** ENG REVIEW COMPLETE — 10 issues found and resolved, 2 open items before live capital deployment.
+## /autoplan Phase 3 — Eng Review (2026-04-11)
+
+### Critical Bugs Fixed
+
+**BUG-1 (CRITICAL): `exit()` side-reversal used wrong string comparison**
+- File: `engine/strategies/two_leg.py` lines 144, 156
+- Root cause: `position.leg_a_side == "short"` — but sides are stored as `"sell"`/`"buy"` not `"short"`/`"long"`. Every exit doubled the short instead of closing it.
+- Fix: Changed to `== "sell"` to produce the correct reverse side.
+- Tests added: `TestExitSideReversal::test_short_leg_exits_with_buy`, `test_long_leg_exits_with_sell`
+
+**BUG-2 (CRITICAL): `get_net_delta_usd()` called `.get()` on tuple not dict**
+- File: `engine/position_tracker.py` line 293
+- Root cause: `for pos in self._live_positions.items()` yields `(key, value)` tuples. `pos.get("currentQty")` on a tuple → always 0. Delta guard silently neutered.
+- Fix: Changed to `for _symbol, pos in self._live_positions.items()`
+- Tests added: `test_position_tracker_delta_reads_dict_not_tuple`
+
+**BUG-3 (HIGH): HARD_STOP blocked exits, not just entries**
+- File: `engine/strategies/base.py` lines 97-111
+- Root cause: Early return on `HARD_STOP` prevented `should_exit()` from being called. Positions that need to close during a margin crisis would stay open.
+- Fix: Restructured `run_once()` — exits always checked, entries blocked on `HARD_STOP`.
+
+### Medium Severity Items
+
+| # | Issue | File | Disposition |
+|---|-------|------|-------------|
+| M1 | WS reconnect sets `_ready` even on failed reconciliation | `position_tracker.py:176` | Open (tracked below) |
+| M2 | `cancelAllAfter` no retry on failure — 15s window gap | `risk_guard.py:114` | Open (tracked below) |
+| M3 | `should_enter()` and `compute_entry_spec()` both call `_get_nearest_future()` | `cash_and_carry.py` | Open (low risk at $10k size) |
+| M4 | Partial fill on leg A unwind not checked | `order_manager.py:241` | Open (pre-live blocker) |
+| M5 | Funding circuit breaker missing for Strategy 2 cumulative cost | `funding_harvest.py` | Open (pre-live blocker) |
+| M6 | `get_rate_limit_remaining()` swallows exception → stale 300 | `exchange/bitmex.py:168` | Open |
+| M7 | `get_net_delta_usd()` doesn't multiply spot qty by price (dimensionally inconsistent) | `position_tracker.py:289` | Open (pre-live blocker) |
+
+### Test Coverage Added (58 total, was 55)
+- `TestExitSideReversal::test_short_leg_exits_with_buy` — regression for BUG-1
+- `TestExitSideReversal::test_long_leg_exits_with_sell` — regression for BUG-1
+- `test_position_tracker_delta_reads_dict_not_tuple` — regression for BUG-2
+
+**OPEN ITEMS (resolve before live capital):**
+1. `cancelAllAfter` retry handler when the call itself fails (M2)
+2. WS reconciliation: only set `_ready` after successful reconciliation (M1)
+3. Spot delta uses raw qty not qty×price — dimensionally wrong (M7)
+4. Unwind leg A failure leaves exchange orphan with no DB record (M4)
+5. Strategy 2 cumulative funding cost circuit breaker (M5)
+
+**VERDICT:** Two critical bugs that would have caused immediate financial harm on first exit are fixed and regression-tested. Eng review complete. 5 pre-live blockers remain open.
+
+---
+
+## /autoplan Phase 3.5 — DX Review (2026-04-11)
+
+### DX Scorecard
+
+| Dimension | Score (before) | Score (after) | Notes |
+|-----------|---------------|---------------|-------|
+| Onboarding (TTHW) | 5/10 | 7/10 | `make install` added; README still missing |
+| Configuration safety | 7/10 | 9/10 | Startup credential check + live mode warning added |
+| Test ergonomics | 8/10 | 8/10 | Already good |
+| Local iteration loop | 6/10 | 6/10 | 30s loop still requires patience; `--once` flag deferred |
+| Error messages | 5/10 | 8/10 | Clear `sys.exit()` message replacing raw `KeyError` |
+| Observability | 7/10 | 7/10 | structlog + dashboard — adequate |
+| Scripts and automation | 5/10 | 7/10 | `make install`, `make lint`, non-destructive `make setup` |
+| Documentation | 4/10 | 4/10 | No README — open item |
+| **Overall** | **5.9/10** | **7.0/10** | |
+
+### Fixes Applied
+
+1. **Startup credential check** (`engine/main.py`): `sys.exit()` with human-readable message + testnet URL instead of raw `KeyError`
+2. **Live mode warning** (`engine/main.py`): logs `WARNING` when `testnet = false`
+3. **Non-destructive `make setup`** (`Makefile`): only restores files if missing, never overwrites local edits to `settings.toml`
+4. **`make install`** (`Makefile`): creates `.venv` and installs deps — documented entry point for new developers
+5. **`make lint`** (`Makefile`): ruff check (soft fail) for code quality
+
+### Open DX Items
+
+1. No README at project root — new developers have no starting point
+2. Python version requirement not documented (3.11+ required for `tomllib`)
+3. No `--once` flag on engine to force a single `run_once()` cycle during strategy development
+4. Funding Rates dashboard page silently empty until backfill is run — dependency not documented
+
+**VERDICT:** DX score improved from 5.9 to 7.0 with 5 targeted fixes under 1 hour total. Core friction points (credential error UX, destructive setup, missing install target) resolved.
  

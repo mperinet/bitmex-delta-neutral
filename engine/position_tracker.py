@@ -290,7 +290,7 @@ class PositionTracker:
         For spot: delta = qty * price.
         """
         total = 0.0
-        for pos in self._live_positions.items():
+        for _symbol, pos in self._live_positions.items():
             qty = pos.get("currentQty", 0)
             total += qty  # For inverse: currentQty is already in USD
         return total

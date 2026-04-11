@@ -222,3 +222,117 @@ class TestCashAndCarryCircuitBreaker:
         rg = RiskGuard(exchange=MagicMock(), max_delta_pct_nav=0.005)
         result = rg.check_funding_circuit_breaker(0.0499, locked_basis=0.10)
         assert result.action == RiskAction.OK
+
+
+# ================================================================== #
+# CRITICAL: Exit side-reversal correctness                             #
+# Exercises the bug fixed in two_leg.py: comparing against "sell"     #
+# instead of "short". Wrong comparison doubled shorts instead of       #
+# closing them.                                                         #
+# ================================================================== #
+
+class TestExitSideReversal:
+    """
+    Verify that exit() places orders that CLOSE positions, not open new ones.
+    A short perp leg (side="sell") must exit with a "buy" order.
+    A long spot leg (side="buy") must exit with a "sell" order.
+    """
+
+    def _make_two_leg_strategy(self):
+        from engine.strategies.funding_harvest import FundingHarvestStrategy
+
+        tracker = MagicMock()
+        tracker.wait_ready = AsyncMock()
+
+        exchange = MagicMock()
+        risk = MagicMock()
+        order_mgr = MagicMock()
+
+        strategy = FundingHarvestStrategy(
+            exchange=exchange,
+            order_manager=order_mgr,
+            position_tracker=tracker,
+            risk_guard=risk,
+            config={
+                "min_funding_rate": 0.0001,
+                "entry_threshold_multiplier": 3,
+                "max_position_usd": 10000,
+            },
+        )
+        return strategy, order_mgr
+
+    @pytest.mark.asyncio
+    async def test_short_leg_exits_with_buy(self):
+        """Leg A stored as side='sell' must produce a 'buy' exit order."""
+        from engine.db.models import PositionState
+        strategy, order_mgr = self._make_two_leg_strategy()
+
+        pos = make_position(
+            leg_a_side="sell",   # short perp → exit must be "buy"
+            leg_a_qty=10000.0,
+            leg_b_side="buy",    # long spot → exit must be "sell"
+            leg_b_qty=0.2,
+            state=PositionState.ACTIVE,
+        )
+
+        order_result = MagicMock()
+        order_result.order_id = "oid-1"
+        order_result.filled_qty = 10000.0
+        order_result.avg_price = 50000.0
+        order_result.fee = 0.0
+
+        order_mgr.place_market = AsyncMock(return_value=order_result)
+
+        with patch("engine.strategies.two_leg.repository") as mock_repo:
+            mock_repo.update_position = AsyncMock()
+            mock_repo.record_trade = AsyncMock()
+            mock_repo.close_position = AsyncMock()
+            await strategy.exit(pos)
+
+        calls = order_mgr.place_market.call_args_list
+        assert len(calls) == 2
+
+        # First call: leg A (was "sell") → must exit as "buy"
+        _sym_a, side_a, _qty_a = calls[0].args[:3]
+        assert side_a == "buy", f"Expected 'buy' to close short leg, got '{side_a}'"
+
+        # Second call: leg B (was "buy") → must exit as "sell"
+        _sym_b, side_b, _qty_b = calls[1].args[:3]
+        assert side_b == "sell", f"Expected 'sell' to close long leg, got '{side_b}'"
+
+    @pytest.mark.asyncio
+    async def test_long_leg_exits_with_sell(self):
+        """Leg A stored as side='buy' must produce a 'sell' exit order."""
+        from engine.db.models import PositionState
+        strategy, order_mgr = self._make_two_leg_strategy()
+
+        pos = make_position(
+            leg_a_side="buy",   # long leg → exit must be "sell"
+            leg_a_qty=10000.0,
+            leg_b_side="sell",  # short leg → exit must be "buy"
+            leg_b_qty=0.2,
+            state=PositionState.ACTIVE,
+        )
+
+        order_result = MagicMock()
+        order_result.order_id = "oid-2"
+        order_result.filled_qty = 0.2
+        order_result.avg_price = 50000.0
+        order_result.fee = 0.0
+
+        order_mgr.place_market = AsyncMock(return_value=order_result)
+
+        with patch("engine.strategies.two_leg.repository") as mock_repo:
+            mock_repo.update_position = AsyncMock()
+            mock_repo.record_trade = AsyncMock()
+            mock_repo.close_position = AsyncMock()
+            await strategy.exit(pos)
+
+        calls = order_mgr.place_market.call_args_list
+        assert len(calls) == 2
+
+        _sym_a, side_a, _qty_a = calls[0].args[:3]
+        assert side_a == "sell", f"Expected 'sell' to close long leg, got '{side_a}'"
+
+        _sym_b, side_b, _qty_b = calls[1].args[:3]
+        assert side_b == "buy", f"Expected 'buy' to close short leg, got '{side_b}'"

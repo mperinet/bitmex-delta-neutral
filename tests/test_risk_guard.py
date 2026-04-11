@@ -180,3 +180,42 @@ async def test_dms_reconnect_extends_timeout(risk_guard, mock_exchange):
         # Should be called with 120_000ms (120s * 1000)
         assert calls[0][0][0] == 120_000
     risk_guard.set_reconnecting(False)
+
+
+# ------------------------------------------------------------------ #
+# CRITICAL: get_net_delta_usd iterates .items() correctly              #
+# Regression test for the bug where pos.get("currentQty") was called  #
+# on a (str, dict) tuple instead of the dict value, silencing the     #
+# delta guard.                                                          #
+# ------------------------------------------------------------------ #
+
+def test_position_tracker_delta_reads_dict_not_tuple():
+    """
+    get_net_delta_usd() must iterate _live_positions.items() and read
+    from the value dict, not from the (key, value) tuple. If this is
+    wrong, it returns 0 regardless of actual position sizes and the
+    REBALANCE guard never fires.
+    """
+    from engine.position_tracker import PositionTracker
+
+    tracker = PositionTracker.__new__(PositionTracker)
+    tracker._live_positions = {
+        "BTC/USD:BTC": {"currentQty": -10000, "symbol": "BTC/USD:BTC"},
+        "BTC/USDT":    {"currentQty":  10000, "symbol": "BTC/USDT"},
+    }
+
+    delta = tracker.get_net_delta_usd()
+    # Net of -10000 + 10000 = 0 for a perfectly hedged book,
+    # but the sum must NOT be silently 0 due to the tuple-indexing bug.
+    # We verify the method can actually read the qty from the dict.
+    assert delta == pytest.approx(0.0)  # hedged → zero delta (correct)
+
+    # Unhedged: one leg only
+    tracker._live_positions = {
+        "BTC/USD:BTC": {"currentQty": -10000, "symbol": "BTC/USD:BTC"},
+    }
+    delta_unhedged = tracker.get_net_delta_usd()
+    assert delta_unhedged == pytest.approx(-10000.0), (
+        f"Expected -10000 but got {delta_unhedged}. "
+        "If 0, the bug is back: .get() is being called on the tuple not the dict."
+    )

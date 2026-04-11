@@ -94,18 +94,20 @@ class Strategy(ABC):
         # Check risk guard before any action
         margin_result = await self._risk.check_margin()
         from engine.risk_guard import RiskAction
-        if margin_result.action == RiskAction.HARD_STOP:
-            return
 
-        # Check existing positions
+        # Always process exits and in-flight entries — even on HARD_STOP.
+        # Only block new entries when margin is stressed.
         open_positions = await repository.get_open_positions(strategy=self.name)
         for pos in open_positions:
             if pos.state == PositionState.ENTERING:
-                await self.continue_entry(pos)
+                if margin_result.action != RiskAction.HARD_STOP:
+                    await self.continue_entry(pos)
             elif await self.should_exit(pos):
                 await self.exit(pos)
 
-        # Try to enter if no open position and conditions are met
+        # Try to enter only when risk is acceptable
+        if margin_result.action == RiskAction.HARD_STOP:
+            return
         if not open_positions and await self.should_enter():
             if margin_result.action != RiskAction.WARNING:
                 await self.enter()

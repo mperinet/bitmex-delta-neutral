@@ -33,10 +33,15 @@ st.set_page_config(
 # DB init (async → sync bridge for Streamlit)                         #
 # ------------------------------------------------------------------ #
 
-@st.cache_resource
-def get_event_loop():
-    loop = asyncio.new_event_loop()
-    return loop
+import concurrent.futures
+
+_db_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def run_async(coro):
+    """Run an async coroutine safely regardless of Streamlit's own event loop."""
+    future = _db_pool.submit(asyncio.run, coro)
+    return future.result()
 
 
 def _load_db_url() -> str:
@@ -50,14 +55,12 @@ def _load_db_url() -> str:
     return config["database"]["url"]
 
 
-# Cache the event loop once per process; init_db is idempotent so calling it
-# on every Streamlit rerun is safe — it returns immediately if already set.
-loop = get_event_loop()
-loop.run_until_complete(init_db(_load_db_url()))
+@st.cache_resource
+def _init_db():
+    run_async(init_db(_load_db_url()))
 
 
-def run_async(coro):
-    return loop.run_until_complete(coro)
+_init_db()
 
 
 # ------------------------------------------------------------------ #
@@ -132,6 +135,7 @@ page = st.sidebar.radio("View", [
     "Live Positions",
     "Funding Rates",
     "Risk",
+    "Smoke Test",
 ])
 
 auto_refresh = st.sidebar.checkbox("Auto-refresh (5s)", value=True)
@@ -213,6 +217,64 @@ elif page == "Risk":
         fig.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="Hard stop (50%)")
         fig.update_layout(title="Margin Utilization Over Time", yaxis_range=[0, 60])
         st.plotly_chart(fig, use_container_width=True)
+
+elif page == "Smoke Test":
+    st.title("Smoke Test")
+    st.caption(
+        "Queues a one-shot integration test: enters a minimal 2-leg position "
+        "(short nearest BTC future + long XBTUSD perp, 100 USD) on testnet, "
+        "then exits on the next engine loop tick (~30s). "
+        "Results appear under Recent runs below and in Live Positions while active."
+    )
+
+    from engine.db import repository
+
+    # Load recent signals (no cache — we want live status)
+    signals = run_async(repository.get_recent_control_signals("smoke_test", limit=5))
+    pending = [s for s in signals if s.consumed_at is None]
+
+    if pending:
+        st.warning(
+            "Smoke test pending — the engine will pick it up on its next loop tick (~30s). "
+            "You can queue another once the engine consumes this one."
+        )
+        st.button("Run Smoke Test", disabled=True)
+    else:
+        if st.button("Run Smoke Test"):
+            run_async(repository.create_control_signal("smoke_test"))
+            st.success("Signal queued. Engine will pick it up within 30s.")
+            st.rerun()
+
+    # Recent smoke test positions (all states, newest first)
+    positions = run_async(repository.get_positions_by_strategy("smoke_test", limit=5))
+    if positions:
+        st.subheader("Recent runs")
+        st.dataframe(
+            pd.DataFrame([{
+                "id": p.id,
+                "state": p.state,
+                "leg_a": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
+                "leg_b": f"{p.leg_b_side} {p.leg_b_qty or 0:.0f} {p.leg_b_symbol or ''}",
+                "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 1}",
+                "realised_pnl": p.realised_pnl or 0,
+                "opened": p.opened_at,
+                "closed": p.closed_at or "—",
+            } for p in positions]),
+            use_container_width=True,
+        )
+
+    # Signal history
+    if signals:
+        st.subheader("Signal history")
+        st.dataframe(
+            pd.DataFrame([{
+                "id": s.id,
+                "created_at": s.created_at,
+                "consumed_at": s.consumed_at,
+                "status": "pending" if s.consumed_at is None else "consumed",
+            } for s in signals]),
+            use_container_width=True,
+        )
 
 # Auto-refresh
 if auto_refresh:

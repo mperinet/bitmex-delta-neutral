@@ -70,12 +70,16 @@ async def run(config: dict) -> None:
     bucket.start()
     logger.info("rate_limit_bucket_started", initial_tokens=initial_tokens)
 
-    # -- Order manager --
-    order_mgr = OrderManager(exchange=exchange, bucket=bucket)
-
     # -- Risk guard + dead-man's switch --
     from engine.risk_guard import RiskGuard
     risk_cfg = config["risk"]
+
+    # -- Order manager --
+    order_mgr = OrderManager(
+        exchange=exchange,
+        bucket=bucket,
+        max_slippage=risk_cfg.get("max_slippage_pct", 0.001),
+    )
     risk_guard = RiskGuard(
         exchange=exchange,
         max_delta_pct_nav=risk_cfg["max_delta_pct_nav"],
@@ -140,11 +144,39 @@ async def run(config: dict) -> None:
     logger.info("position_tracker_ready")
 
     # -- Main loop --
+    from engine.db import repository
+    from engine.strategies.smoke_test import SmokeTestStrategy
+
     logger.info("engine_started", strategies=[s.name for s in strategies])
     last_snapshot = asyncio.get_event_loop().time()
+    smoke_strategy: SmokeTestStrategy | None = None
 
     try:
         while True:
+            # -- Smoke test signal check --
+            if smoke_strategy is None or smoke_strategy._done:
+                signal = await repository.get_pending_control_signal("smoke_test")
+                if signal:
+                    await repository.consume_control_signal(signal.id)
+                    smoke_strategy = SmokeTestStrategy(
+                        exchange=exchange,
+                        order_manager=order_mgr,
+                        position_tracker=tracker,
+                        risk_guard=risk_guard,
+                        config=config["strategy"].get("smoke_test", {
+                            "entry_slices": 3,
+                            "slice_fill_timeout_s": 30,
+                        }),
+                    )
+                    logger.info("smoke_test_triggered", signal_id=signal.id)
+
+            if smoke_strategy is not None and not smoke_strategy._done:
+                try:
+                    await smoke_strategy.run_once()
+                except Exception as e:
+                    logger.error("smoke_test_run_once_error", error=str(e))
+
+            # -- Regular strategies --
             for strategy in strategies:
                 try:
                     await strategy.run_once()
@@ -162,7 +194,6 @@ async def run(config: dict) -> None:
                     btc_price = (await exchange.get_ticker("BTC/USD:BTC")).mark_price
                     nav = tracker.get_nav_usd(btc_price)
                     delta = tracker.get_net_delta_usd()
-                    from engine.db import repository
                     open_count = len(await repository.get_open_positions())
                     await risk_guard.save_snapshot(delta, nav, open_count)
                     last_snapshot = now
@@ -190,7 +221,10 @@ def main() -> None:
         ]
     )
     config = load_config()
-    asyncio.run(run(config))
+    try:
+        asyncio.run(run(config))
+    except KeyboardInterrupt:
+        pass  # second Ctrl+C during asyncio cleanup — already shut down cleanly
 
 
 if __name__ == "__main__":

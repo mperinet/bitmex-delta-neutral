@@ -68,7 +68,8 @@ class PositionTracker:
         # In-memory cache of live position data (keyed by symbol)
         self._live_positions: dict[str, dict] = {}
         self._live_margin: dict = {}
-        self._live_funding: dict[str, dict] = {}  # symbol → latest funding data
+        self._live_funding: dict[str, dict] = {}       # symbol → settlement payment event
+        self._live_instruments: dict[str, dict] = {}   # symbol → current instrument data (fundingRate, markPrice, etc.)
 
         self._ready = asyncio.Event()  # set once reconciliation completes
         self._ws_task: Optional[asyncio.Task] = None
@@ -193,8 +194,16 @@ class PositionTracker:
             logger.info("ws_connected", url=self._ws_url)
 
             async for raw in ws:
-                msg = json.loads(raw)
-                await self._handle_message(msg)
+                # Offload to a task so the WS read loop isn't blocked by
+                # large snapshots (e.g. instrument partial with 300+ items).
+                asyncio.create_task(self._safe_handle(raw))
+
+    async def _safe_handle(self, raw: str) -> None:
+        try:
+            msg = json.loads(raw)
+            await self._handle_message(msg)
+        except Exception as e:
+            logger.error("ws_message_handler_error", error=str(e))
 
     def _build_auth(self) -> dict:
         """Build BitMEX WebSocket auth message."""
@@ -239,23 +248,13 @@ class PositionTracker:
             for item in data:
                 symbol = item.get("symbol")
                 if symbol:
-                    raw_ts = item.get("fundingTimestamp")
-                    next_funding_time = None
-                    if raw_ts:
-                        try:
-                            next_funding_time = datetime.fromisoformat(
-                                raw_ts.replace("Z", "+00:00")
-                            )
-                        except (ValueError, AttributeError):
-                            pass
-                    await repository.upsert_instrument({
-                        "symbol": symbol,
-                        "mark_price": item.get("markPrice"),
-                        "fair_price": item.get("fairPrice"),
-                        "funding_rate": item.get("fundingRate"),
-                        "indicative_funding_rate": item.get("indicativeFundingRate"),
-                        "next_funding_time": next_funding_time,
-                    })
+                    # Update in-memory cache only. Strategies read current funding rate
+                    # from here without waiting for the 8h settlement `funding` event.
+                    # We do NOT write to the DB on every WS tick — the instrument snapshot
+                    # can contain 300+ rows and sequential DB commits would block the loop.
+                    if symbol not in self._live_instruments:
+                        self._live_instruments[symbol] = {}
+                    self._live_instruments[symbol].update(item)
 
         elif table == "margin":
             if data:
@@ -297,7 +296,23 @@ class PositionTracker:
         return total
 
     def get_latest_funding_rate(self, symbol: str) -> Optional[float]:
-        return self._live_funding.get(symbol, {}).get("fundingRate")
+        """
+        Return the current funding rate for a symbol.
+
+        Priority:
+          1. `funding` topic (settlement event) — most recent confirmed payment rate
+          2. `instrument` topic (continuous) — current indicative rate, updated every few seconds
+
+        The `funding` topic only fires at 04:00/12:00/20:00 UTC. Between settlements
+        the current rate is only available via `instrument.fundingRate`, which is what
+        will be paid at the next settlement. Both are used for entry/exit decisions.
+        """
+        # Prefer settlement event if we have one
+        rate = self._live_funding.get(symbol, {}).get("fundingRate")
+        if rate is not None:
+            return rate
+        # Fall back to current indicative rate from instrument stream
+        return self._live_instruments.get(symbol, {}).get("fundingRate")
 
     def stop(self) -> None:
         if self._ws_task:

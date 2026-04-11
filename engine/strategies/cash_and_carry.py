@@ -32,7 +32,8 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"    # XBTUSD perpetual (ccxt symbol)
+PERP_SYMBOL = "BTC/USD:BTC"    # ccxt symbol — used for order placement and REST calls
+PERP_WS_SYMBOL = "XBTUSD"     # BitMEX native symbol — used for WS instrument/funding lookups
 SPOT_INDEX = ".BXBT"           # spot index for basis calculation
 
 
@@ -188,7 +189,7 @@ class CashAndCarryStrategy(TwoLegStrategy):
         symbol = event.get("symbol")
         rate = event.get("fundingRate", 0.0)
 
-        if symbol != PERP_SYMBOL:
+        if symbol != PERP_WS_SYMBOL:
             return
 
         positions = await repository.get_open_positions(strategy=self.name)

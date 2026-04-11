@@ -27,7 +27,8 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"    # XBTUSD on ccxt
+PERP_SYMBOL = "BTC/USD:BTC"    # ccxt symbol — used for order placement and REST calls
+PERP_WS_SYMBOL = "XBTUSD"     # BitMEX native symbol — used for WS instrument/funding lookups
 SPOT_SYMBOL = "BTC/USDT"       # XBT_USDT spot
 
 
@@ -50,7 +51,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("max_position_usd", 10000.0)
 
     async def should_enter(self) -> bool:
-        rate = self._tracker.get_latest_funding_rate(PERP_SYMBOL)
+        rate = self._tracker.get_latest_funding_rate(PERP_WS_SYMBOL)
         if rate is None:
             logger.debug("funding_harvest_no_rate_data")
             return False
@@ -64,7 +65,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return signal
 
     async def should_exit(self, position: Position) -> bool:
-        rate = self._tracker.get_latest_funding_rate(PERP_SYMBOL)
+        rate = self._tracker.get_latest_funding_rate(PERP_WS_SYMBOL)
 
         # No rate data — don't exit, but log a warning
         if rate is None:
@@ -141,7 +142,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         symbol = event.get("symbol")
         rate = event.get("fundingRate", 0.0)
 
-        if symbol != PERP_SYMBOL:
+        if symbol != PERP_WS_SYMBOL:
             return
 
         positions = await repository.get_open_positions(strategy=self.name)

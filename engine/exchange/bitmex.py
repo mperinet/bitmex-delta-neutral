@@ -1,9 +1,9 @@
 """
 BitMEX exchange implementation.
 
-Uses ccxt for order placement and ticker data (ExchangeBase interface).
-Uses the bitmex REST API directly for funding/settlement data that ccxt
-doesn't expose cleanly.
+Uses ccxt for all order placement, ticker data, and funding endpoints.
+Uses ccxt's private_post_* dynamic methods for BitMEX-specific endpoints
+(e.g. cancelAllAfter dead-man's switch) that aren't in the unified API.
 
 Inverse contract math (XBTUSD and similar):
   PnL (BTC) = notional_usd * (1/entry_price - 1/exit_price)

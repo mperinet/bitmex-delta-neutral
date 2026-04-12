@@ -160,10 +160,17 @@ async def run(config: dict) -> None:
     # -- Main loop --
     from engine.db import repository
     from engine.strategies.smoke_test import SmokeTestStrategy
+    from engine.strategies.delta_check import DeltaCheckStrategy
 
     logger.info("engine_started", strategies=[s.name for s in strategies])
     last_snapshot = asyncio.get_event_loop().time()
     smoke_strategy: SmokeTestStrategy | None = None
+    delta_check_strategy: DeltaCheckStrategy | None = None
+
+    _one_shot_cfg = config["strategy"].get("one_shot", {
+        "entry_slices": 3,
+        "slice_fill_timeout_s": 30,
+    })
 
     try:
         while True:
@@ -177,10 +184,7 @@ async def run(config: dict) -> None:
                         order_manager=order_mgr,
                         position_tracker=tracker,
                         risk_guard=risk_guard,
-                        config=config["strategy"].get("smoke_test", {
-                            "entry_slices": 3,
-                            "slice_fill_timeout_s": 30,
-                        }),
+                        config=_one_shot_cfg,
                     )
                     logger.info("smoke_test_triggered", signal_id=signal.id)
 
@@ -189,6 +193,26 @@ async def run(config: dict) -> None:
                     await smoke_strategy.run_once()
                 except Exception as e:
                     logger.error("smoke_test_run_once_error", error=str(e))
+
+            # -- Delta check signal --
+            if delta_check_strategy is None or delta_check_strategy._done:
+                signal = await repository.get_pending_control_signal("delta_check")
+                if signal:
+                    await repository.consume_control_signal(signal.id)
+                    delta_check_strategy = DeltaCheckStrategy(
+                        exchange=exchange,
+                        order_manager=order_mgr,
+                        position_tracker=tracker,
+                        risk_guard=risk_guard,
+                        config=_one_shot_cfg,
+                    )
+                    logger.info("delta_check_triggered", signal_id=signal.id)
+
+            if delta_check_strategy is not None and not delta_check_strategy._done:
+                try:
+                    await delta_check_strategy.run_once()
+                except Exception as e:
+                    logger.error("delta_check_run_once_error", error=str(e))
 
             # -- Regular strategies --
             for strategy in strategies:

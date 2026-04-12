@@ -198,6 +198,7 @@ page = st.sidebar.radio("View", [
     "Funding Rates",
     "Risk",
     "Smoke Test",
+    "Delta Check",
 ])
 
 auto_refresh = st.sidebar.checkbox("Auto-refresh (5s)", value=True)
@@ -365,6 +366,72 @@ elif page == "Smoke Test":
         )
 
     # Signal history
+    if signals:
+        st.subheader("Signal history")
+        st.dataframe(
+            pd.DataFrame([{
+                "id": s.id,
+                "created_at": s.created_at,
+                "consumed_at": s.consumed_at,
+                "status": "pending" if s.consumed_at is None else "consumed",
+            } for s in signals]),
+            width="stretch",
+        )
+
+elif page == "Delta Check":
+    st.title("Delta Balance Check")
+    st.caption(
+        "Enters a minimal short XBTUSD perp + long XBT_USDT spot position "
+        "(inverse + spot legs), reads the net delta from the position tracker "
+        "while ACTIVE, then exits. Verifies that the hedge ratio is balanced "
+        "and that the delta guard correctly converts the spot leg from BTC to USD."
+    )
+
+    from engine.db import repository
+
+    signals = run_async(repository.get_recent_control_signals("delta_check", limit=5))
+    pending = [s for s in signals if s.consumed_at is None]
+
+    if pending:
+        st.warning(
+            "Delta check pending — the engine will pick it up on its next loop tick (~30s)."
+        )
+        st.button("Run Delta Check", disabled=True)
+    else:
+        if st.button("Run Delta Check"):
+            run_async(repository.create_control_signal("delta_check"))
+            st.success("Signal queued. Engine will pick it up within 30s.")
+            st.rerun()
+
+    # Recent delta check positions
+    positions = run_async(repository.get_positions_by_strategy("delta_check", limit=5))
+    if positions:
+        st.subheader("Recent runs")
+
+        rows = []
+        for p in positions:
+            rows.append({
+                "id": p.id,
+                "state": p.state,
+                "leg_a (perp)": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
+                "leg_b (spot)": f"{p.leg_b_side} {p.leg_b_qty or 0:.6f} {p.leg_b_symbol or ''}",
+                "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 3}",
+                "realised_pnl": p.realised_pnl or 0,
+                "opened": p.opened_at,
+                "closed": p.closed_at or "—",
+            })
+
+        st.dataframe(pd.DataFrame(rows), width="stretch")
+
+        # Delta balance result — pulled from the most recently closed position's
+        # structured log is not queryable here, so we show what we can from DB.
+        latest = positions[0]
+        if latest.state == "idle" and latest.closed_at:
+            st.info(
+                "Check engine logs for `delta_check_observation` to see the recorded "
+                "net delta and balance verdict for the completed run."
+            )
+
     if signals:
         st.subheader("Signal history")
         st.dataframe(

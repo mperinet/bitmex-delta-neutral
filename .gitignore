@@ -12,3 +12,8 @@ venv/
 *.db-shm
 data/
 logs/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# uv.lock should be committed — do NOT add it here

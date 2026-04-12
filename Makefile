@@ -1,9 +1,8 @@
-.PHONY: setup install test lint backfill engine dashboard
+.PHONY: setup install test lint format typecheck backfill engine dashboard smoke-test smoke-abort delta-check delta-abort ctl-status
 
-# Create venv and install dependencies (run once after clone)
+# Sync venv from pyproject.toml + uv.lock (run once after clone, or after dep changes)
 install:
-	python3 -m venv .venv
-	.venv/bin/pip install -r requirements.txt
+	uv sync --group dev
 
 # Restore tracked config files only if missing (does NOT overwrite local edits)
 setup:
@@ -17,22 +16,45 @@ setup:
 	fi
 
 test:
-	PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
+	uv run pytest tests/ -v
 
 lint:
-	.venv/bin/python -m ruff check engine/ dashboard/ tests/ || true
+	uv run ruff check engine/ dashboard/ tests/ scripts/
+
+format:
+	uv run ruff check --fix engine/ dashboard/ tests/ scripts/
+	uv run ruff format engine/ dashboard/ tests/ scripts/
+
+typecheck:
+	uv run mypy engine/
 
 backfill-btc:
-	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "BTC/USD:BTC" --limit 500
+	PYTHONPATH=. uv run python scripts/backfill_funding.py --symbols "BTC/USD:BTC" --limit 500
 
 backfill-eth:
-	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "ETH/USD:BTC" --limit 500
+	PYTHONPATH=. uv run python scripts/backfill_funding.py --symbols "ETH/USD:BTC" --limit 500
 
 backfill:
-	PYTHONPATH=. .venv/bin/python scripts/backfill_funding.py --symbols "$(SYMBOL)" --limit $(or $(LIMIT),500)
+	PYTHONPATH=. uv run python scripts/backfill_funding.py --symbols "$(SYMBOL)" --limit $(or $(LIMIT),500)
 
 engine: setup
-	PYTHONPATH=. .venv/bin/python -m engine.main
+	PYTHONPATH=. uv run python -m engine.main
 
 dashboard:
-	.venv/bin/streamlit run dashboard/app.py --server.port 8501
+	uv run streamlit run dashboard/app.py --server.port 8501
+
+# Control CLI — engine must be running (make engine) before using these
+smoke-test:
+	PYTHONPATH=. uv run python scripts/ctl.py smoke_test
+
+smoke-abort:
+	PYTHONPATH=. uv run python scripts/ctl.py smoke_test_abort
+
+delta-check:
+	PYTHONPATH=. uv run python scripts/ctl.py delta_check
+
+delta-abort:
+	PYTHONPATH=. uv run python scripts/ctl.py delta_check_abort
+
+ctl-status:
+	PYTHONPATH=. uv run python scripts/ctl.py status

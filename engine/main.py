@@ -9,17 +9,23 @@ Startup sequence:
   5. Init risk guard + start dead-man's switch
   6. Init position tracker + reconcile with exchange (REST)
   7. Wait for position tracker ready signal
-  8. Start strategies
-  9. Run main loop
+  8. Start control server (aiohttp on 127.0.0.1:8552)
+  9. Start strategies
+ 10. Run main loop
 
 The main loop calls strategy.run_once() every LOOP_INTERVAL_S seconds.
 Strategies are stateless — run_once() is a single check-and-act cycle.
+
+Control commands arrive via HTTP POST to the control server and are put on
+an asyncio.Queue. The main loop uses asyncio.wait_for(queue.get(), timeout=30)
+instead of asyncio.sleep(), so commands take effect immediately rather than
+waiting up to 30 seconds for the next tick.
 """
 
 import asyncio
-import logging
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 import structlog
@@ -28,14 +34,9 @@ from dotenv import load_dotenv
 # Load .env before importing anything that reads it
 load_dotenv(Path(__file__).parent.parent / "config" / ".env")
 
-try:
-    import tomli as tomllib
-except ImportError:
-    import tomllib  # Python 3.11+
-
 logger = structlog.get_logger(__name__)
 
-LOOP_INTERVAL_S = 30    # seconds between strategy run_once() calls
+LOOP_INTERVAL_S = 30  # seconds between strategy run_once() calls
 RISK_SNAPSHOT_INTERVAL_S = 300  # save risk snapshot every 5 minutes
 
 
@@ -45,9 +46,72 @@ def load_config() -> dict:
         return tomllib.load(f)
 
 
+def _dispatch_command(
+    cmd: dict,
+    smoke_strategy,
+    delta_check_strategy,
+    *,
+    exchange,
+    order_mgr,
+    tracker,
+    risk_guard,
+):
+    """
+    Dispatch a control command from the queue. Instantiates one-shot strategies
+    or schedules force_abort() as a background task. Returns updated strategy refs.
+    """
+    from engine.strategies.delta_check import DeltaCheckStrategy
+    from engine.strategies.smoke_test import SmokeTestStrategy
+
+    action = cmd["action"]
+
+    if action == "smoke_test":
+        if smoke_strategy is None or smoke_strategy._done:
+            smoke_strategy = SmokeTestStrategy(
+                exchange=exchange,
+                order_manager=order_mgr,
+                position_tracker=tracker,
+                risk_guard=risk_guard,
+                config={},
+            )
+            logger.info("smoke_test_dispatched")
+        else:
+            logger.warning("smoke_test_already_running")
+
+    elif action == "smoke_test_abort":
+        if smoke_strategy is not None and not smoke_strategy._done:
+            asyncio.create_task(smoke_strategy.force_abort())
+            logger.warning("smoke_test_abort_dispatched")
+        else:
+            logger.info("smoke_test_abort_noop", reason="no active smoke test")
+
+    elif action == "delta_check":
+        if delta_check_strategy is None or delta_check_strategy._done:
+            delta_check_strategy = DeltaCheckStrategy(
+                exchange=exchange,
+                order_manager=order_mgr,
+                position_tracker=tracker,
+                risk_guard=risk_guard,
+                config={},
+            )
+            logger.info("delta_check_dispatched")
+        else:
+            logger.warning("delta_check_already_running")
+
+    elif action == "delta_check_abort":
+        if delta_check_strategy is not None and not delta_check_strategy._done:
+            asyncio.create_task(delta_check_strategy.force_abort())
+            logger.warning("delta_check_abort_dispatched")
+        else:
+            logger.info("delta_check_abort_noop", reason="no active delta check")
+
+    return smoke_strategy, delta_check_strategy
+
+
 async def run(config: dict) -> None:
     # -- Database --
     from engine.db.models import init_db
+
     db_url = config["database"]["url"]
     # Ensure data/ directory exists
     data_dir = Path(__file__).parent.parent / "data"
@@ -71,6 +135,7 @@ async def run(config: dict) -> None:
 
     # -- Exchange --
     from engine.exchange.bitmex import BitMEXExchange
+
     exchange = BitMEXExchange(
         api_key=api_key,
         api_secret=api_secret,
@@ -79,6 +144,7 @@ async def run(config: dict) -> None:
 
     # -- Rate limit bucket (seeded from exchange headers on startup) --
     from engine.order_manager import OrderManager, RateLimitBucket
+
     initial_tokens = await exchange.get_rate_limit_remaining()
     bucket = RateLimitBucket(initial_tokens=initial_tokens)
     bucket.start()
@@ -86,6 +152,7 @@ async def run(config: dict) -> None:
 
     # -- Risk guard + dead-man's switch --
     from engine.risk_guard import RiskGuard
+
     risk_cfg = config["risk"]
 
     # -- Order manager --
@@ -107,10 +174,11 @@ async def run(config: dict) -> None:
     logger.info("dead_mans_switch_started")
 
     # -- Strategies (instantiate before position tracker so callbacks can be registered) --
+    from engine.strategies.base import Strategy
     from engine.strategies.cash_and_carry import CashAndCarryStrategy
     from engine.strategies.funding_harvest import FundingHarvestStrategy
 
-    strategies = []
+    strategies: list[Strategy] = []
 
     if config["strategy"]["cash_and_carry"].get("enabled", True):
         s1 = CashAndCarryStrategy(
@@ -157,79 +225,48 @@ async def run(config: dict) -> None:
     await tracker.wait_ready()
     logger.info("position_tracker_ready")
 
+    # -- Control command queue + HTTP server --
+    control_queue: asyncio.Queue = asyncio.Queue(maxsize=16)
+    from engine.control.server import ControlServer
+
+    ctrl_cfg = config.get("control", {})
+    control_server = ControlServer(
+        queue=control_queue,
+        host=ctrl_cfg.get("host", "127.0.0.1"),
+        port=int(ctrl_cfg.get("port", 8552)),
+    )
+    await control_server.start()
+
     # -- Main loop --
     from engine.db import repository
-    from engine.strategies.smoke_test import SmokeTestStrategy
-    from engine.strategies.delta_check import DeltaCheckStrategy
 
     logger.info("engine_started", strategies=[s.name for s in strategies])
     last_snapshot = asyncio.get_event_loop().time()
-    smoke_strategy: SmokeTestStrategy | None = None
-    delta_check_strategy: DeltaCheckStrategy | None = None
+    smoke_strategy = None
+    delta_check_strategy = None
 
-    _one_shot_cfg = config["strategy"].get("one_shot", {
-        "entry_slices": 3,
-        "slice_fill_timeout_s": 30,
-    })
+    dispatch_kwargs = dict(
+        exchange=exchange,
+        order_mgr=order_mgr,
+        tracker=tracker,
+        risk_guard=risk_guard,
+    )
 
     try:
         while True:
-            # -- Abort signals (checked before run_once so they take effect this tick) --
-            abort_smoke = await repository.get_pending_control_signal("smoke_test_abort")
-            if abort_smoke:
-                await repository.consume_control_signal(abort_smoke.id)
-                if smoke_strategy is not None:
-                    logger.warning("smoke_test_abort_received", signal_id=abort_smoke.id)
-                    try:
-                        await smoke_strategy.force_abort()
-                    except Exception as e:
-                        logger.error("smoke_test_abort_error", error=str(e))
-                        smoke_strategy._done = True
+            # -- Drain any commands that arrived while we were running strategies --
+            while not control_queue.empty():
+                cmd = control_queue.get_nowait()
+                smoke_strategy, delta_check_strategy = _dispatch_command(
+                    cmd, smoke_strategy, delta_check_strategy, **dispatch_kwargs
+                )
 
-            abort_delta = await repository.get_pending_control_signal("delta_check_abort")
-            if abort_delta:
-                await repository.consume_control_signal(abort_delta.id)
-                if delta_check_strategy is not None:
-                    logger.warning("delta_check_abort_received", signal_id=abort_delta.id)
-                    try:
-                        await delta_check_strategy.force_abort()
-                    except Exception as e:
-                        logger.error("delta_check_abort_error", error=str(e))
-                        delta_check_strategy._done = True
-
-            # -- Smoke test signal check --
-            if smoke_strategy is None or smoke_strategy._done:
-                signal = await repository.get_pending_control_signal("smoke_test")
-                if signal:
-                    await repository.consume_control_signal(signal.id)
-                    smoke_strategy = SmokeTestStrategy(
-                        exchange=exchange,
-                        order_manager=order_mgr,
-                        position_tracker=tracker,
-                        risk_guard=risk_guard,
-                        config=_one_shot_cfg,
-                    )
-                    logger.info("smoke_test_triggered", signal_id=signal.id)
-
+            # -- One-shot strategies --
             if smoke_strategy is not None and not smoke_strategy._done:
                 try:
                     await smoke_strategy.run_once()
                 except Exception as e:
                     logger.error("smoke_test_run_once_error", error=str(e))
-
-            # -- Delta check signal --
-            if delta_check_strategy is None or delta_check_strategy._done:
-                signal = await repository.get_pending_control_signal("delta_check")
-                if signal:
-                    await repository.consume_control_signal(signal.id)
-                    delta_check_strategy = DeltaCheckStrategy(
-                        exchange=exchange,
-                        order_manager=order_mgr,
-                        position_tracker=tracker,
-                        risk_guard=risk_guard,
-                        config=_one_shot_cfg,
-                    )
-                    logger.info("delta_check_triggered", signal_id=signal.id)
 
             if delta_check_strategy is not None and not delta_check_strategy._done:
                 try:
@@ -248,7 +285,7 @@ async def run(config: dict) -> None:
                         error=str(e),
                     )
 
-            # Periodic risk snapshot
+            # -- Periodic risk snapshot --
             now = asyncio.get_event_loop().time()
             if now - last_snapshot > RISK_SNAPSHOT_INTERVAL_S:
                 try:
@@ -261,7 +298,14 @@ async def run(config: dict) -> None:
                 except Exception as e:
                     logger.error("risk_snapshot_failed", error=str(e))
 
-            await asyncio.sleep(LOOP_INTERVAL_S)
+            # -- Wait for next tick OR wake immediately on a new control command --
+            try:
+                cmd = await asyncio.wait_for(control_queue.get(), timeout=LOOP_INTERVAL_S)
+                smoke_strategy, delta_check_strategy = _dispatch_command(
+                    cmd, smoke_strategy, delta_check_strategy, **dispatch_kwargs
+                )
+            except TimeoutError:
+                pass  # normal 30s tick
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("engine_shutting_down")
@@ -269,6 +313,7 @@ async def run(config: dict) -> None:
         tracker.stop()
         risk_guard.stop_dead_mans_switch()
         bucket.stop()
+        await control_server.stop()
         await exchange.close()
         logger.info("engine_stopped")
 

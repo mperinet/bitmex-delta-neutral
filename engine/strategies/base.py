@@ -22,12 +22,17 @@ State machine for two-leg strategies:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
+
+import structlog
 
 from engine.db.models import Position
 from engine.exchange.base import ExchangeBase
 from engine.order_manager import OrderManager
 from engine.position_tracker import PositionTracker
 from engine.risk_guard import RiskGuard
+
+logger = structlog.get_logger(__name__)
 
 
 class Strategy(ABC):
@@ -97,10 +102,24 @@ class Strategy(ABC):
 
         # Always process exits and in-flight entries — even on HARD_STOP.
         # Only block new entries when margin is stressed.
+        entry_timeout_s = self._config.get("entry_timeout_seconds", 120)
+
         open_positions = await repository.get_open_positions(strategy=self.name)
         for pos in open_positions:
             if pos.state == PositionState.ENTERING:
-                if margin_result.action != RiskAction.HARD_STOP:
+                elapsed = (datetime.utcnow() - pos.opened_at).total_seconds()
+                if elapsed > entry_timeout_s:
+                    logger.warning(
+                        "entry_timeout_aborting",
+                        strategy=self.name,
+                        position_id=pos.id,
+                        elapsed_s=int(elapsed),
+                        leg_a_filled=pos.leg_a_qty,
+                        leg_b_filled=pos.leg_b_qty,
+                        timeout_s=entry_timeout_s,
+                    )
+                    await self.exit(pos)
+                elif margin_result.action != RiskAction.HARD_STOP:
                     await self.continue_entry(pos)
             elif await self.should_exit(pos):
                 await self.exit(pos)

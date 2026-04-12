@@ -8,7 +8,8 @@ url = "sqlite+aiosqlite:///data/trading.db"
 [risk]
 max_delta_pct_nav = 0.005      # 0.5% of NAV — trigger rebalance above this
 max_margin_utilization = 0.50  # 50% hard cap
-max_slippage_pct = 0.02        # 2% slippage
+max_slippage_pct = 0.005        # 0.5% slippage
+entry_timeout_seconds = 120           # abort an ENTERING position after 120s of no fills
 dead_mans_switch_interval_s = 15
 dead_mans_switch_timeout_s = 60
 dead_mans_switch_reconnect_timeout_s = 120   # extended during WS reconnect

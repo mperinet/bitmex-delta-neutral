@@ -17,14 +17,14 @@ Rate limit headers:
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 
 import ccxt.async_support as ccxt
+import structlog
 
 from engine.exchange.base import Balance, ExchangeBase, OrderBook, OrderResult, Ticker
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 TESTNET_REST = "https://testnet.bitmex.com"
 LIVE_REST = "https://www.bitmex.com"
@@ -239,12 +239,19 @@ class BitMEXExchange(ExchangeBase):
     # ------------------------------------------------------------------
 
     def _parse_order(self, raw: dict) -> OrderResult:
+        info = raw.get("info", {}) or {}
+        # Use BitMEX's raw cumQty (always in contracts: USD for inverse perps/futures,
+        # micro-XBT for XBTUSDT linear) rather than ccxt's `filled` field, which
+        # normalises inverse contract fills to BTC and causes unit mismatches when
+        # comparing against target quantities that are also expressed in contracts.
+        filled_qty = float(info.get("cumQty") or raw.get("filled") or 0.0)
+        qty = float(info.get("orderQty") or raw.get("amount") or 0.0)
         return OrderResult(
             order_id=raw["id"],
             symbol=raw["symbol"],
             side=raw["side"],
-            qty=raw["amount"] or 0.0,
-            filled_qty=raw["filled"] or 0.0,
+            qty=qty,
+            filled_qty=filled_qty,
             avg_price=raw.get("average") or raw.get("price") or 0.0,
             status=raw["status"],
             fee=raw.get("fee", {}).get("cost", 0.0) if raw.get("fee") else 0.0,

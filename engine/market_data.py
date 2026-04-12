@@ -83,6 +83,21 @@ class MarketDataCache:
         """Return the last traded price for a symbol from the instrument stream."""
         return self._instruments.get(symbol, {}).get("lastPrice")
 
+    def get_underlying_to_position_multiplier(self, symbol: str) -> float:
+        """
+        Return the factor that converts currentQty (WS position contracts) to base
+        currency units.
+
+        BitMEX linear perps like XBTUSDT report currentQty in micro-XBT contracts
+        (underlyingToPositionMultiplier = 1_000_000 → 1 contract = 0.000001 XBT).
+        Spot products and inverse contracts have no such multiplier (return 1.0).
+
+        Sourced from the WS instrument snapshot; falls back to 1.0 (identity) so
+        spot/linear symbols without this field in their instrument data are unaffected.
+        """
+        mult = self._instruments.get(symbol, {}).get("underlyingToPositionMultiplier")
+        return float(mult) if mult else 1.0
+
     def is_inverse_contract(self, symbol: str) -> bool:
         """
         Return True if symbol is an inverse (BTC-settled, USD-qty) contract.

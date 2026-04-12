@@ -34,6 +34,7 @@ import structlog
 import websockets
 
 from engine.db import repository
+from engine.db.models import PositionState
 from engine.exchange.base import ExchangeBase
 from engine.market_data import MarketDataCache
 from engine.risk_guard import RiskGuard
@@ -110,14 +111,32 @@ class PositionTracker:
             leg_b_live = live_by_symbol.get(db_pos.leg_b_symbol)
 
             if not leg_a_live and not leg_b_live:
-                logger.error(
-                    "orphan_position_detected",
-                    position_id=db_pos.id,
-                    strategy=db_pos.strategy,
-                    leg_a=db_pos.leg_a_symbol,
-                    leg_b=db_pos.leg_b_symbol,
-                    action="operator_review_required",
-                )
+                # ENTERING with zero fills: nothing was ever sent to the exchange.
+                # Safe to auto-close the DB record — no unwind needed.
+                if (
+                    db_pos.state == PositionState.ENTERING
+                    and db_pos.leg_a_qty == 0.0
+                    and db_pos.leg_b_qty == 0.0
+                ):
+                    await repository.close_position(db_pos.id, realised_pnl=0.0)
+                    logger.warning(
+                        "orphan_entering_no_fills_auto_closed",
+                        position_id=db_pos.id,
+                        strategy=db_pos.strategy,
+                        leg_a=db_pos.leg_a_symbol,
+                        leg_b=db_pos.leg_b_symbol,
+                    )
+                else:
+                    logger.error(
+                        "orphan_position_detected",
+                        position_id=db_pos.id,
+                        strategy=db_pos.strategy,
+                        leg_a=db_pos.leg_a_symbol,
+                        leg_b=db_pos.leg_b_symbol,
+                        leg_a_filled=db_pos.leg_a_qty,
+                        leg_b_filled=db_pos.leg_b_qty,
+                        action="operator_review_required",
+                    )
                 continue
 
             if not leg_a_live or not leg_b_live:
@@ -273,8 +292,13 @@ class PositionTracker:
                     self.market_data.update_instrument(symbol, item)
 
         elif table == "margin":
-            if data:
-                self._live_margin = data[0]
+            # BitMEX sends one row per currency (XBt for BTC, USDt for USDT-margined
+            # contracts). Only the XBt row has walletBalance in satoshis; merge it into
+            # _live_margin so NAV stays denominated in BTC regardless of which row
+            # arrives first or how many currencies the account holds.
+            for item in data:
+                if item.get("currency") in ("XBt", "BTC", None):
+                    self._live_margin = {**self._live_margin, **item}
 
     async def _record_funding_rate(self, item: dict) -> None:
         symbol = item.get("symbol")
@@ -315,8 +339,14 @@ class PositionTracker:
             delta_usd ≈ currentQty × markPrice  (first-order; ignores quanto
             convexity adjustment, acceptable for delta-neutral threshold checks)
 
-        - Linear / Spot (XBTUSDT, XBT_USDT, ETH_USDT):
-            USDT-settled or spot. currentQty is in the base currency (BTC/ETH).
+        - Linear perps (XBTUSDT):
+            USDT-settled. currentQty is in micro-XBT contracts; divide by
+            underlyingToPositionMultiplier (1_000_000) to get XBT, then × markPrice.
+            delta_usd = (currentQty / underlyingToPositionMultiplier) × markPrice
+
+        - Spot (XBT_USDT, ETH_USDT):
+            currentQty is already in base currency (BTC/ETH).
+            underlyingToPositionMultiplier is absent → defaults to 1.0 (no-op).
             delta_usd = currentQty × markPrice
 
         Contract type is resolved via market_data.is_inverse_contract() which
@@ -334,7 +364,11 @@ class PositionTracker:
             else:
                 mark_price = pos.get("markPrice") or self.market_data.get_mark_price(symbol) or 0.0
                 if mark_price > 0:
-                    total += qty * mark_price
+                    # currentQty for linear perps is in contracts, not base currency.
+                    # Divide by underlyingToPositionMultiplier (e.g. 1_000_000 for XBTUSDT)
+                    # to convert to XBT first.  For spot, the multiplier is 1.0 (no-op).
+                    mult = self.market_data.get_underlying_to_position_multiplier(symbol)
+                    total += (qty / mult) * mark_price
                 else:
                     logger.warning(
                         "delta_price_unavailable",

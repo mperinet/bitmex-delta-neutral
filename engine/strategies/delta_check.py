@@ -3,11 +3,11 @@ Delta Balance Check Strategy — one-shot manual integration test.
 
 Triggered by a "delta_check" control signal from the dashboard (same
 mechanism as the smoke test). Enters a minimal short XBTUSD perp + long
-XBT_USDT spot position, lets the position tracker read the live delta
-from both legs, logs whether exposure is balanced, then exits.
+BTCUSDT linear perpetual position, lets the position tracker read the live
+delta from both legs, logs whether exposure is balanced, then exits.
 
-Purpose: verify that get_net_delta_usd() correctly converts the spot leg
-from BTC to USD (using lastPrice from the instrument stream) and that the
+Purpose: verify that get_net_delta_usd() correctly converts the linear perp
+leg from BTC to USD (using markPrice from the instrument stream) and that the
 delta guard actually sees a near-zero net delta for a hedged book.
 
 Tick sequence:
@@ -32,7 +32,12 @@ logger = structlog.get_logger(__name__)
 
 PERP_SYMBOL = "BTC/USD:BTC"  # ccxt symbol for order placement
 PERP_WS_SYMBOL = "XBTUSD"  # BitMEX native symbol in _live_positions
-SPOT_SYMBOL = "BTC/USDT"  # XBT_USDT spot
+LINEAR_PERP_SYMBOL = "BTC/USDT:USDT"  # BTCUSDT linear perpetual
+# underlyingToPositionMultiplier from BitMEX contract spec:
+# 1 contract = 0.000001 XBT (micro-XBT), so contracts = XBT_amount × 1_000_000
+LINEAR_UNDERLYING_TO_POSITION_MULT = 1_000_000
+PERP_LOT_SIZE = 100    # XBTUSD minimum order increment in USD contracts
+LINEAR_LOT_SIZE = 100  # XBTUSDT minimum order increment in micro-XBT contracts
 MIN_NOTIONAL_USD = 100.0
 DELTA_BALANCE_THRESHOLD = 0.02  # 2% imbalance triggers a warning in the log
 
@@ -107,13 +112,13 @@ class DeltaCheckStrategy(TwoLegStrategy):
 
     async def compute_entry_spec(self) -> EntrySpec | None:
         perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
-        spot_ticker = await self._exchange.get_ticker(SPOT_SYMBOL)
+        linear_ticker = await self._exchange.get_ticker(LINEAR_PERP_SYMBOL)
         balance = await self._exchange.get_balance()
 
-        # Use the same 40% formula as production strategies but cap at MIN_NOTIONAL
+        # Use the same 40% formula as production strategies (floor at MIN_NOTIONAL_USD)
         usd_notional = max(
             MIN_NOTIONAL_USD,
-            min(balance.available * perp_ticker.mark_price * 0.40, 1000.0),
+            balance.available * perp_ticker.mark_price * 0.40,
         )
 
         if balance.available * perp_ticker.mark_price < MIN_NOTIONAL_USD:
@@ -124,18 +129,31 @@ class DeltaCheckStrategy(TwoLegStrategy):
             )
             return None
 
-        perp_qty = usd_notional  # USD contracts (inverse)
-        spot_qty = usd_notional / spot_ticker.ask  # BTC to buy
+        # XBTUSD qty is in USD contracts (1 contract = $1 notional); must be a
+        # multiple of PERP_LOT_SIZE (100) or the exchange rounds down on fill,
+        # leaving a sub-lot remainder that can never be filled.
+        perp_qty = max(
+            float(PERP_LOT_SIZE),
+            round(usd_notional / PERP_LOT_SIZE) * PERP_LOT_SIZE,
+        )
+        # XBTUSDT qty is in micro-XBT contracts (1 contract = 0.000001 XBT).
+        # Convert: contracts = (usd_notional / ask) × underlyingToPositionMultiplier
+        # then round to the nearest lot (100 contracts).
+        linear_qty_raw = (usd_notional / linear_ticker.ask) * LINEAR_UNDERLYING_TO_POSITION_MULT
+        linear_qty = max(
+            float(LINEAR_LOT_SIZE),
+            round(linear_qty_raw / LINEAR_LOT_SIZE) * LINEAR_LOT_SIZE,
+        )
 
         logger.info(
             "delta_check_entry_spec",
             notional_usd=usd_notional,
             perp_qty=perp_qty,
-            spot_qty=round(spot_qty, 6),
+            linear_qty=linear_qty,
         )
 
         return EntrySpec(
-            leg_a=LegSpec(symbol=PERP_SYMBOL, side="sell", qty=perp_qty),
-            leg_b=LegSpec(symbol=SPOT_SYMBOL, side="buy", qty=spot_qty),
+            leg_a=LegSpec(symbol=PERP_SYMBOL,        side="sell", qty=perp_qty),
+            leg_b=LegSpec(symbol=LINEAR_PERP_SYMBOL, side="buy",  qty=linear_qty),
             metadata={},
         )

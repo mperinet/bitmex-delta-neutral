@@ -105,25 +105,35 @@ class OrderManager:
         # Prevents placing orders below exchange minimums (e.g. 100 contracts for XBTUSD).
         self._min_order_size: dict[str, float] = {}
 
+    # Hardcoded fallbacks for BitMEX contracts whose minimums ccxt doesn't
+    # reliably populate on testnet. Values are in the contract's native unit
+    # (USD contracts for inverse perps/futures, BTC for quanto/linear).
+    _BITMEX_KNOWN_MINIMUMS: dict[str, float] = {
+        "BTC/USD:BTC": 100.0,   # XBTUSD inverse perp — 100 USD contracts
+        "ETH/USD:ETH": 1.0,     # ETHUSD inverse perp — 1 USD contract
+        "BTC/USDT:USDT": 100.0, # XBTUSDT linear perp — 100 micro-XBT contracts
+    }
+
     def _get_min_order_size(self, symbol: str) -> float:
         """Return the minimum order size for a symbol, queried from ccxt market data.
-        Returns 0.0 if the information is unavailable (skips the check)."""
+        Falls back to hardcoded BitMEX minimums when ccxt returns nothing (common on
+        testnet). Returns 0.0 only if truly unknown (skips the check)."""
         if symbol in self._min_order_size:
             return self._min_order_size[symbol]
         try:
             ccxt = getattr(self._exchange, "_ccxt", None)
             if ccxt is None:
-                return 0.0
+                return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
             markets = getattr(ccxt, "markets", None)
             if not isinstance(markets, dict):
-                return 0.0
+                return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
             market = markets.get(symbol, {})
             min_amt = (market.get("limits") or {}).get("amount", {}).get("min") or 0
-            result = float(min_amt)
+            result = float(min_amt) or self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
             self._min_order_size[symbol] = result
             return result
         except Exception:
-            return 0.0
+            return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
 
     # ------------------------------------------------------------------
     # Single order placement
@@ -203,6 +213,19 @@ class OrderManager:
         """
         # Already fully filled — just ensure state is ACTIVE
         if leg_a_remaining <= 0 and leg_b_remaining <= 0:
+            await repository.update_position(position_id, state=PositionState.ACTIVE)
+            return True
+
+        # One leg finished ahead of the other — guard against division-by-zero in the
+        # ratio calculation below.  This shouldn't happen with correctly-sized legs but
+        # can occur if filled_qty units are mismatched (e.g. inverse vs linear contracts).
+        if leg_a_remaining <= 0 or leg_b_remaining <= 0:
+            logger.warning(
+                "fill_next_slice_leg_imbalance",
+                position_id=position_id,
+                remaining_a=leg_a_remaining,
+                remaining_b=leg_b_remaining,
+            )
             await repository.update_position(position_id, state=PositionState.ACTIVE)
             return True
 

@@ -55,7 +55,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("max_position_usd", 10000.0)
 
     async def should_enter(self) -> bool:
-        rate = self._tracker.get_latest_funding_rate(PERP_WS_SYMBOL)
+        rate = self._tracker.market_data.get_latest_funding_rate(PERP_WS_SYMBOL)
         if rate is None:
             logger.debug("funding_harvest_no_rate_data")
             return False
@@ -75,7 +75,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("max_cumulative_funding_cost", 0.002)
 
     async def should_exit(self, position: Position) -> bool:
-        rate = self._tracker.get_latest_funding_rate(PERP_WS_SYMBOL)
+        rate = self._tracker.market_data.get_latest_funding_rate(PERP_WS_SYMBOL)
 
         # No rate data — don't exit, but log a warning
         if rate is None:

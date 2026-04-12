@@ -1,10 +1,14 @@
 """
-Position tracker — maintains real-time position state via WebSocket.
+Position tracker — maintains real-time position and margin state via WebSocket.
 
 On startup: reconciles DB positions with live exchange state (REST).
 On WS reconnect: reconciles again before signaling 'ready' to strategies.
-During operation: updates in-memory state from WS 'position' and
-'execution' topics.
+During operation: updates in-memory position/margin state from WS topics.
+
+Instrument/funding metadata (funding rates, mark prices) is handled by
+MarketDataCache (engine/market_data.py), which this tracker populates from
+the WS feed but does not own conceptually. Strategies read instrument data
+from tracker.market_data, not from the tracker itself.
 
 State recovery rule: strategies are stateless. On startup, position_tracker
 loads all non-IDLE positions from DB and cross-checks them against the
@@ -14,8 +18,8 @@ as an orphan and triggers an alert.
 Subscriptions used:
   - position: position changes (fills, funding, liquidation warnings)
   - execution: fill confirmations
-  - funding: funding rate payments received/paid
-  - instrument: mark price, funding rate, indicative rate
+  - funding: funding rate payments received/paid → forwarded to MarketDataCache
+  - instrument: mark price, funding rate → forwarded to MarketDataCache
   - margin: available balance updates
 """
 
@@ -28,6 +32,8 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import websockets
+
+from engine.market_data import MarketDataCache
 import structlog
 
 from engine.db import repository
@@ -65,11 +71,12 @@ class PositionTracker:
         self._api_secret = api_secret
         self._on_funding_payment = on_funding_payment
 
-        # In-memory cache of live position data (keyed by symbol)
+        # In-memory cache of live position and margin state (keyed by symbol)
         self._live_positions: dict[str, dict] = {}
         self._live_margin: dict = {}
-        self._live_funding: dict[str, dict] = {}       # symbol → settlement payment event
-        self._live_instruments: dict[str, dict] = {}   # symbol → current instrument data (fundingRate, markPrice, etc.)
+
+        # Instrument/funding metadata — owned by MarketDataCache, populated here from WS
+        self.market_data = MarketDataCache()
 
         self._ready = asyncio.Event()  # set once reconciliation completes
         self._ws_task: Optional[asyncio.Task] = None
@@ -255,7 +262,7 @@ class PositionTracker:
             for item in data:
                 symbol = item.get("symbol")
                 if symbol:
-                    self._live_funding[symbol] = item
+                    self.market_data.update_funding(symbol, item)
                     if self._on_funding_payment:
                         await self._on_funding_payment(item)
                     await self._record_funding_rate(item)
@@ -264,13 +271,10 @@ class PositionTracker:
             for item in data:
                 symbol = item.get("symbol")
                 if symbol:
-                    # Update in-memory cache only. Strategies read current funding rate
-                    # from here without waiting for the 8h settlement `funding` event.
-                    # We do NOT write to the DB on every WS tick — the instrument snapshot
-                    # can contain 300+ rows and sequential DB commits would block the loop.
-                    if symbol not in self._live_instruments:
-                        self._live_instruments[symbol] = {}
-                    self._live_instruments[symbol].update(item)
+                    # Forward to MarketDataCache. We do NOT write to the DB on every
+                    # WS tick — the instrument snapshot can contain 300+ rows and
+                    # sequential DB commits would block the loop.
+                    self.market_data.update_instrument(symbol, item)
 
         elif table == "margin":
             if data:
@@ -321,32 +325,13 @@ class PositionTracker:
             else:
                 # Spot/linear: qty is in BTC (or other base), convert to USD
                 last_price = (
-                    self._live_instruments.get(symbol, {}).get("lastPrice")
+                    self.market_data.get_last_price(symbol)
                     or pos.get("markPrice")
                     or pos.get("currentPrice")
                     or 0
                 )
                 total += qty * last_price
         return total
-
-    def get_latest_funding_rate(self, symbol: str) -> Optional[float]:
-        """
-        Return the current funding rate for a symbol.
-
-        Priority:
-          1. `funding` topic (settlement event) — most recent confirmed payment rate
-          2. `instrument` topic (continuous) — current indicative rate, updated every few seconds
-
-        The `funding` topic only fires at 04:00/12:00/20:00 UTC. Between settlements
-        the current rate is only available via `instrument.fundingRate`, which is what
-        will be paid at the next settlement. Both are used for entry/exit decisions.
-        """
-        # Prefer settlement event if we have one
-        rate = self._live_funding.get(symbol, {}).get("fundingRate")
-        if rate is not None:
-            return rate
-        # Fall back to current indicative rate from instrument stream
-        return self._live_instruments.get(symbol, {}).get("fundingRate")
 
     def stop(self) -> None:
         if self._ws_task:

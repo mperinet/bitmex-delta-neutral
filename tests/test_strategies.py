@@ -111,7 +111,7 @@ class TestFundingHarvestStrategy:
         from engine.strategies.funding_harvest import FundingHarvestStrategy
 
         tracker = MagicMock()
-        tracker.get_latest_funding_rate = MagicMock(return_value=funding_rate)
+        tracker.market_data.get_latest_funding_rate = MagicMock(return_value=funding_rate)
         tracker.wait_ready = AsyncMock()
 
         exchange = MagicMock()
@@ -351,7 +351,7 @@ class TestFundingHarvestCumulativeCost:
     def _make_strategy_with_rate(self, funding_rate=0.0003):
         from engine.strategies.funding_harvest import FundingHarvestStrategy
         tracker = MagicMock()
-        tracker.get_latest_funding_rate = MagicMock(return_value=funding_rate)
+        tracker.market_data.get_latest_funding_rate = MagicMock(return_value=funding_rate)
         return FundingHarvestStrategy(
             exchange=MagicMock(),
             order_manager=MagicMock(),

@@ -197,9 +197,10 @@ def test_position_tracker_delta_reads_dict_not_tuple():
     REBALANCE guard never fires.
     """
     from engine.position_tracker import PositionTracker
+    from engine.market_data import MarketDataCache
 
     tracker = PositionTracker.__new__(PositionTracker)
-    tracker._live_instruments = {}  # no live price data in this unit test
+    tracker.market_data = MarketDataCache()  # no live price data in this unit test
 
     # Single inverse position: short $10k XBTUSD — currentQty is already in USD
     tracker._live_positions = {
@@ -211,10 +212,11 @@ def test_position_tracker_delta_reads_dict_not_tuple():
         "If 0, the bug is back: .get() is being called on the tuple not the dict."
     )
 
-    # Two inverse legs that cancel (long + short same notional)
+    # Two inverse legs that cancel: short XBTUSD perp + long quarterly future
+    # Both are inverse (no '_' in symbol, defaulting to True without cache)
     tracker._live_positions = {
-        "XBTUSD": {"currentQty": -10000},
-        "ETHUSD": {"currentQty":  10000},
+        "XBTUSD":    {"currentQty": -10000},
+        "XBTUSDTZ25": {"currentQty":  10000},
     }
     delta_net = tracker.get_net_delta_usd()
     assert delta_net == pytest.approx(0.0)  # hedged → zero net delta

@@ -77,6 +77,32 @@ class MarketDataCache:
         """
         return self._instruments.get(symbol, {}).get("fundingRate")
 
+    def get_mark_price(self, symbol: str) -> Optional[float]:
+        """Return the current mark price for a symbol from the instrument stream."""
+        return self._instruments.get(symbol, {}).get("markPrice")
+
     def get_last_price(self, symbol: str) -> Optional[float]:
         """Return the last traded price for a symbol from the instrument stream."""
         return self._instruments.get(symbol, {}).get("lastPrice")
+
+    def is_inverse_contract(self, symbol: str) -> bool:
+        """
+        Return True if symbol is an inverse (BTC-settled, USD-qty) contract.
+
+        Resolution order:
+        1. WS instrument cache — authoritative once the instrument snapshot arrives.
+        2. '_' in symbol → spot / linear (XBT_USDT, ETH_USDT) — not inverse.
+        3. Default True — covers XBTUSD, XBTEUR, XBTETH and quarterly futures
+           (XBTUSDTZ25, etc.) whose symbols contain no '_'.
+
+        Edge case: XBTUSDT (linear perpetual) has no '_' and isInverse=False.
+        It falls into bucket 3 until the WS instrument snapshot populates the
+        cache.  This is a brief startup window; live delta checks run after the
+        WS is established so the cache is populated before any action is taken.
+        """
+        instrument = self._instruments.get(symbol, {})
+        if "isInverse" in instrument:
+            return bool(instrument["isInverse"])
+        if "_" in symbol:
+            return False
+        return True  # default: XBT-prefixed inverse contracts and their futures

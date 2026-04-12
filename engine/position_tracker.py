@@ -307,30 +307,49 @@ class PositionTracker:
         """
         Sum of all open position deltas in USD.
 
-        BitMEX conventions:
-          - Inverse (XBTUSD, ETHUSD ...): currentQty is in USD contracts. Signed.
-          - Spot/linear (XBT_USDT ...): currentQty is in BTC. Multiply by last price.
+        BitMEX contract settlement types have different currentQty semantics:
 
-        We distinguish by native symbol suffix: inverse symbols end in "USD" but
-        NOT "USDT". Spot/linear end in "USDT" or contain an underscore.
+        - Inverse (XBTUSD, XBTEUR, XBTETH and quarterly futures like XBTUSDTZ25):
+            BTC-settled. currentQty is the USD notional (number of $1 contracts).
+            delta_usd = currentQty
+
+        - Quanto (ETHUSD, SOLUSD, etc.):
+            BTC-settled at a fixed XBT multiplier (0.000001 XBT/contract).
+            NOT inverse. currentQty is in contracts (USD-quoted, BTC-settled).
+            delta_usd ≈ currentQty × markPrice  (first-order; ignores quanto
+            convexity adjustment, acceptable for delta-neutral threshold checks)
+
+        - Linear / Spot (XBTUSDT, XBT_USDT, ETH_USDT):
+            USDT-settled or spot. currentQty is in the base currency (BTC/ETH).
+            delta_usd = currentQty × markPrice
+
+        Contract type is resolved via market_data.is_inverse_contract() which
+        prefers the WS instrument cache (isInverse flag) over symbol pattern
+        matching. Mark price for non-inverse positions is taken from the position
+        record first, then from market_data.get_mark_price().
         """
         total = 0.0
         for symbol, pos in self._live_positions.items():
             qty = pos.get("currentQty", 0)
             if not qty:
                 continue
-            # Inverse: qty is already denominated in USD
-            if symbol.endswith("USD") and not symbol.endswith("USDT"):
+            if self.market_data.is_inverse_contract(symbol):
                 total += qty
             else:
-                # Spot/linear: qty is in BTC (or other base), convert to USD
-                last_price = (
-                    self.market_data.get_last_price(symbol)
-                    or pos.get("markPrice")
-                    or pos.get("currentPrice")
-                    or 0
+                mark_price = (
+                    pos.get("markPrice")
+                    or self.market_data.get_mark_price(symbol)
+                    or 0.0
                 )
-                total += qty * last_price
+                if mark_price > 0:
+                    total += qty * mark_price
+                else:
+                    logger.warning(
+                        "delta_price_unavailable",
+                        symbol=symbol,
+                        qty=qty,
+                        action="position_excluded_from_delta",
+                    )
         return total
 
     def stop(self) -> None:

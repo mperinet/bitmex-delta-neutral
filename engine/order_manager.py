@@ -103,6 +103,29 @@ class OrderManager:
         self._exchange = exchange
         self._bucket = bucket
         self._max_slippage = max_slippage
+        # Minimum order sizes per symbol — populated lazily from ccxt market info.
+        # Prevents placing orders below exchange minimums (e.g. 100 contracts for XBTUSD).
+        self._min_order_size: dict[str, float] = {}
+
+    def _get_min_order_size(self, symbol: str) -> float:
+        """Return the minimum order size for a symbol, queried from ccxt market data.
+        Returns 0.0 if the information is unavailable (skips the check)."""
+        if symbol in self._min_order_size:
+            return self._min_order_size[symbol]
+        try:
+            ccxt = getattr(self._exchange, "_ccxt", None)
+            if ccxt is None:
+                return 0.0
+            markets = getattr(ccxt, "markets", None)
+            if not isinstance(markets, dict):
+                return 0.0
+            market = markets.get(symbol, {})
+            min_amt = (market.get("limits") or {}).get("amount", {}).get("min") or 0
+            result = float(min_amt)
+            self._min_order_size[symbol] = result
+            return result
+        except Exception:
+            return 0.0
 
     # ------------------------------------------------------------------
     # Single order placement
@@ -214,6 +237,21 @@ class OrderManager:
         ratio = min(fill_a / leg_a_remaining, fill_b / leg_b_remaining)
         fill_a = leg_a_remaining * ratio
         fill_b = leg_b_remaining * ratio
+
+        # Reject the slice if either leg would be below the exchange's minimum order size.
+        # This prevents a "minimum amount precision" rejection when one leg has thin depth.
+        min_a = self._get_min_order_size(leg_a_symbol)
+        min_b = self._get_min_order_size(leg_b_symbol)
+        if (min_a and fill_a < min_a) or (min_b and fill_b < min_b):
+            logger.info(
+                "fill_next_slice_below_minimum",
+                position_id=position_id,
+                leg_a=f"{fill_a:.4f} {leg_a_symbol} (min {min_a})",
+                leg_b=f"{fill_b:.6f} {leg_b_symbol} (min {min_b})",
+                ratio=ratio,
+                reason="slice_below_exchange_minimum",
+            )
+            return False
 
         logger.info(
             "fill_next_slice_placing",

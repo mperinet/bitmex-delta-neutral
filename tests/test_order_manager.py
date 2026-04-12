@@ -341,3 +341,35 @@ async def test_fill_next_slice_proportional_sizing(order_mgr, mock_exchange):
     leg_b_qty = placed_qtys[1][1]
     assert leg_b_qty == pytest.approx(0.005, rel=1e-6)
     assert leg_a_qty == pytest.approx(250.0, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_fill_next_slice_skips_when_slice_below_minimum(mock_exchange, bucket):
+    """
+    Slice computed from depth ratio falls below exchange minimum order size.
+    Regression for: bitmex amount of BTC/USD:BTC must be greater than minimum
+    amount precision of 100 — when spot leg has thin depth, the ratio scales
+    the inverse leg down below 100 contracts.
+
+    Simulates XBTUSD min=100 contracts via injected _min_order_size cache.
+    """
+    # Spot leg has only 0.00003 BTC depth — pulls ratio to ~0.0015
+    # giving fill_a ≈ 1.5 contracts, below the 100-contract minimum
+    mock_exchange.fetch_orderbook = AsyncMock(side_effect=[
+        make_orderbook(asks=[[50010, 100]], bids=[[49990, 100]]),    # leg A: 100 USD depth
+        make_orderbook(asks=[[50010, 0.00003]], bids=[[49990, 100]]),  # leg B: 0.00003 BTC depth
+    ])
+
+    mgr = OrderManager(exchange=mock_exchange, bucket=bucket, max_slippage=0.001)
+    # Inject known minimum sizes (bypasses ccxt market lookup in unit test)
+    mgr._min_order_size["BTC/USD:BTC"] = 100.0   # XBTUSD: 100 contracts
+    mgr._min_order_size["BTC/USDT"] = 0.0001      # spot: 0.0001 BTC
+
+    result = await mgr.fill_next_slice(
+        position_id=1, strategy="test",
+        leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
+        leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+    )
+
+    assert result is False  # skipped — slice too small
+    assert mock_exchange.place_market_order.call_count == 0  # no orders placed

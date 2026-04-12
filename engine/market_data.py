@@ -7,9 +7,13 @@ mark prices) is symbol-level information, not position state.
 The cache is written by PositionTracker's WS handler and read by strategies
 and any component that needs live instrument data without going to REST.
 
-Two sources, priority order for funding rate:
-  1. `funding` topic — settlement event (definitive, fires at 04:00/12:00/20:00 UTC)
-  2. `instrument` topic — current indicative rate, updated every few seconds
+Two distinct funding rate sources:
+  - `funding` topic  → settlement events (04:00/12:00/20:00 UTC) — what was actually paid
+  - `instrument` topic → indicative rate, updated every few seconds — what will be paid next
+
+Use get_latest_funding_rate() when you need confirmed settlement data (accounting,
+circuit breakers on realised cost). Use get_predictive_funding_rate() when you need
+a forward-looking signal for entry/exit decisions.
 """
 
 from __future__ import annotations
@@ -48,19 +52,29 @@ class MarketDataCache:
 
     def get_latest_funding_rate(self, symbol: str) -> Optional[float]:
         """
-        Return the current funding rate for a symbol.
+        Return the most recent confirmed funding rate from a settlement event.
 
-        Priority:
-          1. `funding` topic (settlement event) — most recent confirmed payment rate
-          2. `instrument` topic (continuous) — current indicative rate
+        Source: `funding` WS topic only — fires at 04:00/12:00/20:00 UTC.
+        Returns None between settlement windows (no event received yet this period).
 
-        The `funding` topic only fires at 04:00/12:00/20:00 UTC. Between
-        settlements the current rate is only available via instrument.fundingRate.
-        Both are used for entry/exit decisions.
+        Use for: accounting, circuit breakers on realised cost, post-settlement checks.
+        Do NOT use for entry/exit signals — stale between settlements.
         """
-        rate = self._funding.get(symbol, {}).get("fundingRate")
-        if rate is not None:
-            return rate
+        return self._funding.get(symbol, {}).get("fundingRate")
+
+    def get_predictive_funding_rate(self, symbol: str) -> Optional[float]:
+        """
+        Return the current indicative funding rate from the instrument stream.
+
+        Source: `instrument` WS topic — updated every few seconds by BitMEX.
+        This is `instrument.fundingRate`: the rate that will be charged at the
+        next settlement if market conditions hold. It is the primary signal for
+        entry/exit decisions.
+
+        Returns None until the first instrument update is received for this symbol.
+
+        Use for: entry signals, exit signals, real-time strategy logic.
+        """
         return self._instruments.get(symbol, {}).get("fundingRate")
 
     def get_last_price(self, symbol: str) -> Optional[float]:

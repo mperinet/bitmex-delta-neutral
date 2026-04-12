@@ -9,11 +9,25 @@ from engine.exchange.base import Balance, OrderBook, OrderResult
 from engine.order_manager import OrderManager, RateLimitBucket
 
 
-def make_order(order_id="o1", symbol="BTC/USD:BTC", side="sell", qty=1000.0,
-               filled=1000.0, price=50000.0, status="closed", fee=0.075):
+def make_order(
+    order_id="o1",
+    symbol="BTC/USD:BTC",
+    side="sell",
+    qty=1000.0,
+    filled=1000.0,
+    price=50000.0,
+    status="closed",
+    fee=0.075,
+):
     return OrderResult(
-        order_id=order_id, symbol=symbol, side=side, qty=qty,
-        filled_qty=filled, avg_price=price, status=status, fee=fee,
+        order_id=order_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        filled_qty=filled,
+        avg_price=price,
+        status=status,
+        fee=fee,
     )
 
 
@@ -52,6 +66,7 @@ def order_mgr(mock_exchange, bucket):
 # Rate limit bucket                                                    #
 # ------------------------------------------------------------------ #
 
+
 @pytest.mark.asyncio
 async def test_bucket_initialized_with_tokens(bucket):
     assert bucket.tokens_remaining == 300
@@ -86,10 +101,13 @@ async def test_bucket_emergency_can_go_below_reserve(bucket):
 # Order placement                                                      #
 # ------------------------------------------------------------------ #
 
+
 @pytest.mark.asyncio
 async def test_place_limit_calls_exchange(order_mgr, mock_exchange):
     result = await order_mgr.place_limit("BTC/USD:BTC", "sell", 1000, 50000)
-    mock_exchange.place_limit_order.assert_called_once_with("BTC/USD:BTC", "sell", 1000, 50000, True)
+    mock_exchange.place_limit_order.assert_called_once_with(
+        "BTC/USD:BTC", "sell", 1000, 50000, True
+    )
     assert result.order_id == "o1"
 
 
@@ -103,6 +121,7 @@ async def test_cancel_calls_exchange(order_mgr, mock_exchange):
 # ------------------------------------------------------------------ #
 # _available_qty — static method unit tests                            #
 # ------------------------------------------------------------------ #
+
 
 def test_available_qty_buy_sums_asks_within_slippage():
     # mid=50000, limit=50050 (0.1% slippage)
@@ -135,8 +154,8 @@ def test_available_qty_zero_mid_price():
 
 def test_available_qty_wider_slippage_captures_more():
     ob = make_orderbook(asks=[[50010, 100], [50030, 200], [50100, 500]], bids=[])
-    qty_tight = OrderManager._available_qty(ob, "buy", 50000, 0.001)   # 0.1%
-    qty_wide  = OrderManager._available_qty(ob, "buy", 50000, 0.002)   # 0.2%
+    qty_tight = OrderManager._available_qty(ob, "buy", 50000, 0.001)  # 0.1%
+    qty_wide = OrderManager._available_qty(ob, "buy", 50000, 0.002)  # 0.2%
     assert qty_wide >= qty_tight
 
 
@@ -144,8 +163,8 @@ def test_available_qty_wider_slippage_captures_more():
 # fill_next_slice                                                      #
 # ------------------------------------------------------------------ #
 
-def _make_pos(leg_a_qty=0.0, leg_b_qty=0.0, leg_a_target=1000.0, leg_b_target=0.02,
-              slices_done=0):
+
+def _make_pos(leg_a_qty=0.0, leg_b_qty=0.0, leg_a_target=1000.0, leg_b_target=0.02, slices_done=0):
     pos = MagicMock()
     pos.leg_a_qty = leg_a_qty
     pos.leg_b_qty = leg_b_qty
@@ -162,9 +181,9 @@ def _make_pos(leg_a_qty=0.0, leg_b_qty=0.0, leg_a_target=1000.0, leg_b_target=0.
 async def test_fill_next_slice_places_market_orders(order_mgr, mock_exchange):
     """Sufficient depth on both legs → two market orders placed, returns True."""
     # Orderbook has 500 USD depth within slippage (more than the 1000 USD target in one shot)
-    mock_exchange.fetch_orderbook = AsyncMock(return_value=make_orderbook(
-        asks=[[50010, 2000]], bids=[[49990, 2000]]
-    ))
+    mock_exchange.fetch_orderbook = AsyncMock(
+        return_value=make_orderbook(asks=[[50010, 2000]], bids=[[49990, 2000]])
+    )
     mock_exchange.place_market_order = AsyncMock(return_value=make_order(filled=1000.0))
 
     with patch("engine.order_manager.repository") as repo:
@@ -173,9 +192,14 @@ async def test_fill_next_slice_places_market_orders(order_mgr, mock_exchange):
         repo.record_trade = AsyncMock()
 
         result = await order_mgr.fill_next_slice(
-            position_id=1, strategy="test",
-            leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-            leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+            position_id=1,
+            strategy="test",
+            leg_a_symbol="BTC/USD:BTC",
+            leg_a_side="sell",
+            leg_a_remaining=1000.0,
+            leg_b_symbol="BTC/USDT",
+            leg_b_side="buy",
+            leg_b_remaining=0.02,
         )
 
     assert result is True
@@ -185,15 +209,22 @@ async def test_fill_next_slice_places_market_orders(order_mgr, mock_exchange):
 @pytest.mark.asyncio
 async def test_fill_next_slice_skips_when_leg_a_has_no_depth(order_mgr, mock_exchange):
     """Leg A orderbook has no depth within slippage → skip, return False."""
-    mock_exchange.fetch_orderbook = AsyncMock(side_effect=[
-        make_orderbook(asks=[[50200, 500]], bids=[[49990, 500]]),  # leg A: ask outside slippage
-        make_orderbook(asks=[[50010, 500]], bids=[[49990, 500]]),  # leg B: fine
-    ])
+    mock_exchange.fetch_orderbook = AsyncMock(
+        side_effect=[
+            make_orderbook(asks=[[50200, 500]], bids=[[49990, 500]]),  # leg A: ask outside slippage
+            make_orderbook(asks=[[50010, 500]], bids=[[49990, 500]]),  # leg B: fine
+        ]
+    )
 
     result = await order_mgr.fill_next_slice(
-        position_id=1, strategy="test",
-        leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-        leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+        position_id=1,
+        strategy="test",
+        leg_a_symbol="BTC/USD:BTC",
+        leg_a_side="sell",
+        leg_a_remaining=1000.0,
+        leg_b_symbol="BTC/USDT",
+        leg_b_side="buy",
+        leg_b_remaining=0.02,
     )
 
     assert result is False
@@ -203,15 +234,22 @@ async def test_fill_next_slice_skips_when_leg_a_has_no_depth(order_mgr, mock_exc
 @pytest.mark.asyncio
 async def test_fill_next_slice_skips_when_leg_b_has_no_depth(order_mgr, mock_exchange):
     """Leg B has no depth within slippage → skip, return False."""
-    mock_exchange.fetch_orderbook = AsyncMock(side_effect=[
-        make_orderbook(asks=[[50010, 500]], bids=[[49990, 500]]),  # leg A: fine
-        make_orderbook(asks=[[50200, 500]], bids=[[49990, 500]]),  # leg B: ask outside slippage
-    ])
+    mock_exchange.fetch_orderbook = AsyncMock(
+        side_effect=[
+            make_orderbook(asks=[[50010, 500]], bids=[[49990, 500]]),  # leg A: fine
+            make_orderbook(asks=[[50200, 500]], bids=[[49990, 500]]),  # leg B: ask outside slippage
+        ]
+    )
 
     result = await order_mgr.fill_next_slice(
-        position_id=1, strategy="test",
-        leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-        leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+        position_id=1,
+        strategy="test",
+        leg_a_symbol="BTC/USD:BTC",
+        leg_a_side="sell",
+        leg_a_remaining=1000.0,
+        leg_b_symbol="BTC/USDT",
+        leg_b_side="buy",
+        leg_b_remaining=0.02,
     )
 
     assert result is False
@@ -221,9 +259,9 @@ async def test_fill_next_slice_skips_when_leg_b_has_no_depth(order_mgr, mock_exc
 @pytest.mark.asyncio
 async def test_fill_next_slice_unwinds_leg_a_on_leg_b_failure(order_mgr, mock_exchange):
     """Leg B market order raises → leg A immediately unwound."""
-    mock_exchange.fetch_orderbook = AsyncMock(return_value=make_orderbook(
-        asks=[[50010, 2000]], bids=[[49990, 2000]]
-    ))
+    mock_exchange.fetch_orderbook = AsyncMock(
+        return_value=make_orderbook(asks=[[50010, 2000]], bids=[[49990, 2000]])
+    )
 
     call_count = {"n": 0}
 
@@ -238,9 +276,14 @@ async def test_fill_next_slice_unwinds_leg_a_on_leg_b_failure(order_mgr, mock_ex
     with patch("engine.order_manager.repository"):
         with pytest.raises(RuntimeError):
             await order_mgr.fill_next_slice(
-                position_id=1, strategy="test",
-                leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-                leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+                position_id=1,
+                strategy="test",
+                leg_a_symbol="BTC/USD:BTC",
+                leg_a_side="sell",
+                leg_a_remaining=1000.0,
+                leg_b_symbol="BTC/USDT",
+                leg_b_side="buy",
+                leg_b_remaining=0.02,
             )
 
     # 3 calls total: leg A, leg B (raises), unwind leg A
@@ -255,29 +298,40 @@ async def test_fill_next_slice_marks_active_when_fully_filled(order_mgr, mock_ex
     """When the slice fills the remaining qty, position transitions to ACTIVE."""
     from engine.db.models import PositionState
 
-    mock_exchange.fetch_orderbook = AsyncMock(return_value=make_orderbook(
-        asks=[[50010, 2000]], bids=[[49990, 2000]]
-    ))
+    mock_exchange.fetch_orderbook = AsyncMock(
+        return_value=make_orderbook(asks=[[50010, 2000]], bids=[[49990, 2000]])
+    )
     mock_exchange.place_market_order = AsyncMock(return_value=make_order(filled=1000.0))
 
     # Position already has 0 filled; target is 1000 → this slice fills it completely
     with patch("engine.order_manager.repository") as repo:
-        repo.get_position = AsyncMock(return_value=_make_pos(
-            leg_a_qty=0.0, leg_b_qty=0.0,
-            leg_a_target=1000.0, leg_b_target=0.02,
-        ))
+        repo.get_position = AsyncMock(
+            return_value=_make_pos(
+                leg_a_qty=0.0,
+                leg_b_qty=0.0,
+                leg_a_target=1000.0,
+                leg_b_target=0.02,
+            )
+        )
         repo.update_position = AsyncMock()
         repo.record_trade = AsyncMock()
 
-        mock_exchange.place_market_order = AsyncMock(side_effect=[
-            make_order(filled=1000.0, symbol="BTC/USD:BTC"),  # leg A fills target
-            make_order(filled=0.02,   symbol="BTC/USDT"),      # leg B fills target
-        ])
+        mock_exchange.place_market_order = AsyncMock(
+            side_effect=[
+                make_order(filled=1000.0, symbol="BTC/USD:BTC"),  # leg A fills target
+                make_order(filled=0.02, symbol="BTC/USDT"),  # leg B fills target
+            ]
+        )
 
         await order_mgr.fill_next_slice(
-            position_id=1, strategy="test",
-            leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-            leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+            position_id=1,
+            strategy="test",
+            leg_a_symbol="BTC/USD:BTC",
+            leg_a_side="sell",
+            leg_a_remaining=1000.0,
+            leg_b_symbol="BTC/USDT",
+            leg_b_side="buy",
+            leg_b_remaining=0.02,
         )
 
         update_call = repo.update_position.call_args
@@ -291,9 +345,14 @@ async def test_fill_next_slice_already_filled_marks_active(order_mgr, mock_excha
         repo.update_position = AsyncMock()
 
         result = await order_mgr.fill_next_slice(
-            position_id=1, strategy="test",
-            leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=0.0,
-            leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.0,
+            position_id=1,
+            strategy="test",
+            leg_a_symbol="BTC/USD:BTC",
+            leg_a_side="sell",
+            leg_a_remaining=0.0,
+            leg_b_symbol="BTC/USDT",
+            leg_b_side="buy",
+            leg_b_remaining=0.0,
         )
 
     assert result is True
@@ -323,16 +382,24 @@ async def test_fill_next_slice_proportional_sizing(order_mgr, mock_exchange):
     mock_exchange.place_market_order = AsyncMock(side_effect=capture_market)
 
     with patch("engine.order_manager.repository") as repo:
-        repo.get_position = AsyncMock(return_value=_make_pos(
-            leg_a_target=1000.0, leg_b_target=0.02,
-        ))
+        repo.get_position = AsyncMock(
+            return_value=_make_pos(
+                leg_a_target=1000.0,
+                leg_b_target=0.02,
+            )
+        )
         repo.update_position = AsyncMock()
         repo.record_trade = AsyncMock()
 
         await order_mgr.fill_next_slice(
-            position_id=1, strategy="test",
-            leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-            leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+            position_id=1,
+            strategy="test",
+            leg_a_symbol="BTC/USD:BTC",
+            leg_a_side="sell",
+            leg_a_remaining=1000.0,
+            leg_b_symbol="BTC/USDT",
+            leg_b_side="buy",
+            leg_b_remaining=0.02,
         )
 
     # Leg B was the constraint (0.005 / 0.02 = 25% of remaining)
@@ -355,20 +422,29 @@ async def test_fill_next_slice_skips_when_slice_below_minimum(mock_exchange, buc
     """
     # Spot leg has only 0.00003 BTC depth — pulls ratio to ~0.0015
     # giving fill_a ≈ 1.5 contracts, below the 100-contract minimum
-    mock_exchange.fetch_orderbook = AsyncMock(side_effect=[
-        make_orderbook(asks=[[50010, 100]], bids=[[49990, 100]]),    # leg A: 100 USD depth
-        make_orderbook(asks=[[50010, 0.00003]], bids=[[49990, 100]]),  # leg B: 0.00003 BTC depth
-    ])
+    mock_exchange.fetch_orderbook = AsyncMock(
+        side_effect=[
+            make_orderbook(asks=[[50010, 100]], bids=[[49990, 100]]),  # leg A: 100 USD depth
+            make_orderbook(
+                asks=[[50010, 0.00003]], bids=[[49990, 100]]
+            ),  # leg B: 0.00003 BTC depth
+        ]
+    )
 
     mgr = OrderManager(exchange=mock_exchange, bucket=bucket, max_slippage=0.001)
     # Inject known minimum sizes (bypasses ccxt market lookup in unit test)
-    mgr._min_order_size["BTC/USD:BTC"] = 100.0   # XBTUSD: 100 contracts
-    mgr._min_order_size["BTC/USDT"] = 0.0001      # spot: 0.0001 BTC
+    mgr._min_order_size["BTC/USD:BTC"] = 100.0  # XBTUSD: 100 contracts
+    mgr._min_order_size["BTC/USDT"] = 0.0001  # spot: 0.0001 BTC
 
     result = await mgr.fill_next_slice(
-        position_id=1, strategy="test",
-        leg_a_symbol="BTC/USD:BTC", leg_a_side="sell", leg_a_remaining=1000.0,
-        leg_b_symbol="BTC/USDT",   leg_b_side="buy",  leg_b_remaining=0.02,
+        position_id=1,
+        strategy="test",
+        leg_a_symbol="BTC/USD:BTC",
+        leg_a_side="sell",
+        leg_a_remaining=1000.0,
+        leg_b_symbol="BTC/USDT",
+        leg_b_side="buy",
+        leg_b_remaining=0.02,
     )
 
     assert result is False  # skipped — slice too small

@@ -22,7 +22,6 @@ State machine for two-leg strategies:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from engine.db.models import Position
 from engine.exchange.base import ExchangeBase
@@ -38,7 +37,7 @@ class Strategy(ABC):
         self,
         exchange: ExchangeBase,
         order_manager: OrderManager,
-        position_tracker: PositionTracker,
+        position_tracker: PositionTracker | None,
         risk_guard: RiskGuard,
         config: dict,
     ):
@@ -59,7 +58,7 @@ class Strategy(ABC):
         ...
 
     @abstractmethod
-    async def enter(self) -> Optional[int]:
+    async def enter(self) -> int | None:
         """Open a new position. Returns position_id or None on failure."""
         ...
 
@@ -89,6 +88,7 @@ class Strategy(ABC):
         from engine.db.models import PositionState
 
         # Wait for position tracker to be ready (handles WS reconnect)
+        assert self._tracker is not None, "position_tracker not wired — call engine startup"
         await self._tracker.wait_ready()
 
         # Check risk guard before any action

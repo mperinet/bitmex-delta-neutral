@@ -5,27 +5,24 @@ Usage:
   python scripts/backfill_funding.py --symbols XBTUSD ETHUSD --limit 500
 """
 
-import asyncio
 import argparse
+import asyncio
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / "config" / ".env")
 
-try:
-    import tomli as tomllib
-except ImportError:
-    import tomllib
+load_dotenv(Path(__file__).parent.parent / "config" / ".env")
 
 
 async def backfill(symbols: list[str], limit: int) -> None:
+    from engine.db import repository
     from engine.db.models import init_db
     from engine.exchange.bitmex import BitMEXExchange
-    from engine.db import repository
 
     config_path = Path(__file__).parent.parent / "config" / "settings.toml"
     with open(config_path, "rb") as f:
@@ -49,6 +46,7 @@ async def backfill(symbols: list[str], limit: int) -> None:
             rates = await exchange.get_historical_funding(symbol, limit=limit)
             for r in rates:
                 from datetime import datetime
+
                 ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
                 await repository.insert_funding_rate(symbol, ts, r["rate"])
             print(f"  → {len(rates)} records inserted for {symbol}")

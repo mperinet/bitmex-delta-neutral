@@ -21,19 +21,16 @@ Entry threshold (3x): 0.03%/8h = ~32.85% APR
 
 from __future__ import annotations
 
-from typing import Optional
-
 import structlog
 
 from engine.db.models import Position
-from engine.exchange.bitmex import BitMEXExchange
 from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"    # ccxt symbol — used for order placement and REST calls
-PERP_WS_SYMBOL = "XBTUSD"     # BitMEX native symbol — used for WS instrument/funding lookups
-SPOT_SYMBOL = "BTC/USDT"       # XBT_USDT spot
+PERP_SYMBOL = "BTC/USD:BTC"  # ccxt symbol — used for order placement and REST calls
+PERP_WS_SYMBOL = "XBTUSD"  # BitMEX native symbol — used for WS instrument/funding lookups
+SPOT_SYMBOL = "BTC/USDT"  # XBT_USDT spot
 
 
 class FundingHarvestStrategy(TwoLegStrategy):
@@ -55,6 +52,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("max_position_usd", 10000.0)
 
     async def should_enter(self) -> bool:
+        assert self._tracker is not None
         rate = self._tracker.market_data.get_predictive_funding_rate(PERP_WS_SYMBOL)
         if rate is None:
             logger.debug("funding_harvest_no_rate_data")
@@ -75,6 +73,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("max_cumulative_funding_cost", 0.002)
 
     async def should_exit(self, position: Position) -> bool:
+        assert self._tracker is not None
         rate = self._tracker.market_data.get_predictive_funding_rate(PERP_WS_SYMBOL)
 
         # No rate data — don't exit, but log a warning
@@ -115,7 +114,7 @@ class FundingHarvestStrategy(TwoLegStrategy):
 
         return False
 
-    async def compute_entry_spec(self) -> Optional[EntrySpec]:
+    async def compute_entry_spec(self) -> EntrySpec | None:
         perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
         spot_ticker = await self._exchange.get_ticker(SPOT_SYMBOL)
         balance = await self._exchange.get_balance()
@@ -132,8 +131,8 @@ class FundingHarvestStrategy(TwoLegStrategy):
             logger.warning("funding_harvest_insufficient_balance", available=balance.available)
             return None
 
-        perp_qty = usd_notional                             # USD contracts (inverse)
-        spot_qty = usd_notional / spot_ticker.ask           # BTC to buy
+        perp_qty = usd_notional  # USD contracts (inverse)
+        spot_qty = usd_notional / spot_ticker.ask  # BTC to buy
 
         return EntrySpec(
             leg_a=LegSpec(symbol=PERP_SYMBOL, side="sell", qty=perp_qty),

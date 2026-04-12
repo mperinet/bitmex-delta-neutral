@@ -9,10 +9,8 @@ get_open_positions() to recover state from the DB before strategies run.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
 
-from sqlalchemy import distinct, select, update, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, distinct, select, update
 
 from engine.db.models import (
     ControlSignal,
@@ -25,10 +23,10 @@ from engine.db.models import (
     get_session,
 )
 
-
 # ---------------------------------------------------------------------------
 # Instruments
 # ---------------------------------------------------------------------------
+
 
 async def upsert_instrument(data: dict) -> None:
     async with get_session() as session:
@@ -45,17 +43,16 @@ async def upsert_instrument(data: dict) -> None:
         await session.commit()
 
 
-async def get_instrument(symbol: str) -> Optional[Instrument]:
+async def get_instrument(symbol: str) -> Instrument | None:
     async with get_session() as session:
-        result = await session.execute(
-            select(Instrument).where(Instrument.symbol == symbol)
-        )
+        result = await session.execute(select(Instrument).where(Instrument.symbol == symbol))
         return result.scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------------
 # Funding rates
 # ---------------------------------------------------------------------------
+
 
 async def insert_funding_rate(symbol: str, timestamp: datetime, rate: float) -> None:
     async with get_session() as session:
@@ -73,7 +70,7 @@ async def insert_funding_rate(symbol: str, timestamp: datetime, rate: float) -> 
             await session.rollback()
 
 
-async def get_funding_summary() -> List[dict]:
+async def get_funding_summary() -> list[dict]:
     """
     Return one row per symbol with:
       - last_rate      : most recent 8h funding rate (%)
@@ -81,7 +78,6 @@ async def get_funding_summary() -> List[dict]:
       - avg_10d        : mean daily avg rate over last 10 days (%)
     Sorted descending by last_rate.
     """
-    from sqlalchemy import func, cast, Date as SADate
 
     async with get_session() as session:
         # All distinct symbols
@@ -103,8 +99,7 @@ async def get_funding_summary() -> List[dict]:
 
             # Indicative (predicted) rate from instruments
             inst_result = await session.execute(
-                select(Instrument.indicative_funding_rate)
-                .where(Instrument.symbol == symbol)
+                select(Instrument.indicative_funding_rate).where(Instrument.symbol == symbol)
             )
             predicted_rate = inst_result.scalar_one_or_none()
 
@@ -118,18 +113,20 @@ async def get_funding_summary() -> List[dict]:
             hist_rates = [r[0] for r in hist_result.all()]
             avg_10d = sum(hist_rates) / len(hist_rates) if hist_rates else None
 
-            rows.append({
-                "symbol": symbol,
-                "last_rate": last_rate,
-                "predicted_rate": predicted_rate,
-                "avg_10d": avg_10d,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "last_rate": last_rate,
+                    "predicted_rate": predicted_rate,
+                    "avg_10d": avg_10d,
+                }
+            )
 
-        rows.sort(key=lambda r: (r["last_rate"] or 0), reverse=True)
+        rows.sort(key=lambda r: r["last_rate"] or 0, reverse=True)
         return rows
 
 
-async def get_funding_symbols() -> List[str]:
+async def get_funding_symbols() -> list[str]:
     """Return all distinct symbols that have funding rate records."""
     async with get_session() as session:
         result = await session.execute(
@@ -138,7 +135,7 @@ async def get_funding_symbols() -> List[str]:
         return [row[0] for row in result.all()]
 
 
-async def get_recent_funding(symbol: str, limit: int = 90) -> List[FundingRate]:
+async def get_recent_funding(symbol: str, limit: int = 90) -> list[FundingRate]:
     """Return the last `limit` funding rate records (most recent first)."""
     async with get_session() as session:
         result = await session.execute(
@@ -154,6 +151,7 @@ async def get_recent_funding(symbol: str, limit: int = 90) -> List[FundingRate]:
 # Positions
 # ---------------------------------------------------------------------------
 
+
 async def create_position(strategy: str, **kwargs) -> Position:
     async with get_session() as session:
         pos = Position(strategy=strategy, state=PositionState.ENTERING, **kwargs)
@@ -166,15 +164,11 @@ async def create_position(strategy: str, **kwargs) -> Position:
 async def update_position(position_id: int, **kwargs) -> None:
     kwargs["updated_at"] = datetime.utcnow()
     async with get_session() as session:
-        await session.execute(
-            update(Position)
-            .where(Position.id == position_id)
-            .values(**kwargs)
-        )
+        await session.execute(update(Position).where(Position.id == position_id).values(**kwargs))
         await session.commit()
 
 
-async def get_open_positions(strategy: Optional[str] = None) -> List[Position]:
+async def get_open_positions(strategy: str | None = None) -> list[Position]:
     """Return all positions that are not IDLE (entering, active, exiting)."""
     async with get_session() as session:
         q = select(Position).where(Position.state != PositionState.IDLE)
@@ -184,11 +178,9 @@ async def get_open_positions(strategy: Optional[str] = None) -> List[Position]:
         return list(result.scalars().all())
 
 
-async def get_position(position_id: int) -> Optional[Position]:
+async def get_position(position_id: int) -> Position | None:
     async with get_session() as session:
-        result = await session.execute(
-            select(Position).where(Position.id == position_id)
-        )
+        result = await session.execute(select(Position).where(Position.id == position_id))
         return result.scalar_one_or_none()
 
 
@@ -204,6 +196,7 @@ async def close_position(position_id: int, realised_pnl: float) -> None:
 # ---------------------------------------------------------------------------
 # Trades
 # ---------------------------------------------------------------------------
+
 
 async def record_trade(
     position_id: int,
@@ -239,7 +232,8 @@ async def record_trade(
 # Risk snapshots
 # ---------------------------------------------------------------------------
 
-async def get_positions_by_strategy(strategy: str, limit: int = 10) -> List[Position]:
+
+async def get_positions_by_strategy(strategy: str, limit: int = 10) -> list[Position]:
     """Return recent positions for a strategy (all states, newest first)."""
     async with get_session() as session:
         result = await session.execute(
@@ -255,6 +249,7 @@ async def get_positions_by_strategy(strategy: str, limit: int = 10) -> List[Posi
 # Control signals
 # ---------------------------------------------------------------------------
 
+
 async def create_control_signal(signal: str) -> ControlSignal:
     async with get_session() as session:
         sig = ControlSignal(signal=signal)
@@ -264,15 +259,17 @@ async def create_control_signal(signal: str) -> ControlSignal:
         return sig
 
 
-async def get_pending_control_signal(signal: str) -> Optional[ControlSignal]:
+async def get_pending_control_signal(signal: str) -> ControlSignal | None:
     """Return the oldest unconsumed signal of this type, or None."""
     async with get_session() as session:
         result = await session.execute(
             select(ControlSignal)
-            .where(and_(
-                ControlSignal.signal == signal,
-                ControlSignal.consumed_at.is_(None),
-            ))
+            .where(
+                and_(
+                    ControlSignal.signal == signal,
+                    ControlSignal.consumed_at.is_(None),
+                )
+            )
             .order_by(ControlSignal.created_at.asc())
             .limit(1)
         )
@@ -289,7 +286,7 @@ async def consume_control_signal(signal_id: int) -> None:
         await session.commit()
 
 
-async def get_recent_control_signals(signal: str, limit: int = 10) -> List[ControlSignal]:
+async def get_recent_control_signals(signal: str, limit: int = 10) -> list[ControlSignal]:
     async with get_session() as session:
         result = await session.execute(
             select(ControlSignal)

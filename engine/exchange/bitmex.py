@@ -17,10 +17,8 @@ Rate limit headers:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
 
 import ccxt.async_support as ccxt
 
@@ -41,12 +39,14 @@ class BitMEXExchange(ExchangeBase):
         self.ws_url = TESTNET_WS if testnet else LIVE_WS
         self._last_rate_limit_remaining: int = 300
 
-        self._ccxt = ccxt.bitmex({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": False,   # we manage our own token bucket
-            "options": {"defaultType": "swap"},
-        })
+        self._ccxt = ccxt.bitmex(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "enableRateLimit": False,  # we manage our own token bucket
+                "options": {"defaultType": "swap"},
+            }
+        )
         if testnet:
             self._ccxt.set_sandbox_mode(True)
 
@@ -63,9 +63,7 @@ class BitMEXExchange(ExchangeBase):
         post_only: bool = True,
     ) -> OrderResult:
         params = {"execInst": "ParticipateDoNotInitiate"} if post_only else {}
-        raw = await self._ccxt.create_order(
-            symbol, "limit", side, qty, price, params
-        )
+        raw = await self._ccxt.create_order(symbol, "limit", side, qty, price, params)
         self._update_rate_limit(raw)
         return self._parse_order(raw)
 
@@ -82,7 +80,7 @@ class BitMEXExchange(ExchangeBase):
             logger.warning("cancel_order: %s not found (already filled?)", order_id)
             return False
 
-    async def cancel_all_orders(self, symbol: Optional[str] = None) -> int:
+    async def cancel_all_orders(self, symbol: str | None = None) -> int:
         params = {"symbol": symbol} if symbol else {}
         result = await self._ccxt.cancel_all_orders(symbol, params)
         return len(result) if isinstance(result, list) else 0
@@ -153,11 +151,10 @@ class BitMEXExchange(ExchangeBase):
         """Return all active futures (FFCCSX type) for the given underlying."""
         markets = await self._ccxt.load_markets()
         return [
-            m for m in markets.values()
-            if m.get("future") and m.get("active") and not m.get("swap")
+            m for m in markets.values() if m.get("future") and m.get("active") and not m.get("swap")
         ]
 
-    async def get_settlement_date(self, symbol: str) -> Optional[datetime]:
+    async def get_settlement_date(self, symbol: str) -> datetime | None:
         """Return the expiry datetime for a futures contract, or None for perps."""
         markets = await self._ccxt.load_markets()
         market = markets.get(symbol)
@@ -173,9 +170,7 @@ class BitMEXExchange(ExchangeBase):
         """
         try:
             await self._ccxt.fetch_ticker("BTC/USD:BTC")
-            remaining = self._ccxt.last_response_headers.get(
-                "x-ratelimit-remaining", 300
-            )
+            remaining = self._ccxt.last_response_headers.get("x-ratelimit-remaining", 300)
             self._last_rate_limit_remaining = int(remaining)
         except Exception as e:
             logger.warning("Could not fetch rate limit remaining: %s", e)

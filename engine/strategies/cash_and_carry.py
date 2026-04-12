@@ -20,8 +20,7 @@ Key considerations:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import UTC, datetime
 
 import structlog
 
@@ -32,9 +31,9 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"    # ccxt symbol — used for order placement and REST calls
-PERP_WS_SYMBOL = "XBTUSD"     # BitMEX native symbol — used for WS instrument/funding lookups
-SPOT_INDEX = ".BXBT"           # spot index for basis calculation
+PERP_SYMBOL = "BTC/USD:BTC"  # ccxt symbol — used for order placement and REST calls
+PERP_WS_SYMBOL = "XBTUSD"  # BitMEX native symbol — used for WS instrument/funding lookups
+SPOT_INDEX = ".BXBT"  # spot index for basis calculation
 
 
 class CashAndCarryStrategy(TwoLegStrategy):
@@ -56,22 +55,19 @@ class CashAndCarryStrategy(TwoLegStrategy):
     def _hours_before_expiry_exit(self) -> int:
         return 24
 
-    async def _get_nearest_future(self) -> Optional[tuple[str, float, datetime]]:
+    async def _get_nearest_future(self) -> tuple[str, float, datetime] | None:
         """
         Find the nearest active quarterly future for BTC.
         Returns (ccxt_symbol, mark_price, expiry_datetime) or None.
         """
         futures = await self._exchange.get_active_futures()
-        btc_futures = [
-            f for f in futures
-            if "BTC" in f.get("base", "") and f.get("expiry")
-        ]
+        btc_futures = [f for f in futures if "BTC" in f.get("base", "") and f.get("expiry")]
         if not btc_futures:
             return None
         # Sort by expiry ascending, pick nearest
         btc_futures.sort(key=lambda f: f["expiry"])
         nearest = btc_futures[0]
-        expiry_dt = datetime.fromtimestamp(nearest["expiry"] / 1000, tz=timezone.utc)
+        expiry_dt = datetime.fromtimestamp(nearest["expiry"] / 1000, tz=UTC)
         ticker = await self._exchange.get_ticker(nearest["symbol"])
         return nearest["symbol"], ticker.mark_price, expiry_dt
 
@@ -82,7 +78,7 @@ class CashAndCarryStrategy(TwoLegStrategy):
         future_symbol, future_price, expiry = result
 
         # Don't enter if expiry is too close
-        days_to_expiry = (expiry - datetime.now(tz=timezone.utc)).days
+        days_to_expiry = (expiry - datetime.now(tz=UTC)).days
         if days_to_expiry < 7:
             logger.debug("cash_and_carry_expiry_too_close", days=days_to_expiry)
             return False
@@ -107,7 +103,7 @@ class CashAndCarryStrategy(TwoLegStrategy):
         # Expiry check: exit 24h before settlement
         if position.expiry:
             hours_remaining = (
-                position.expiry.replace(tzinfo=timezone.utc) - datetime.now(tz=timezone.utc)
+                position.expiry.replace(tzinfo=UTC) - datetime.now(tz=UTC)
             ).total_seconds() / 3600
             if hours_remaining < self._hours_before_expiry_exit:
                 logger.info(
@@ -132,7 +128,7 @@ class CashAndCarryStrategy(TwoLegStrategy):
 
         return False
 
-    async def compute_entry_spec(self) -> Optional[EntrySpec]:
+    async def compute_entry_spec(self) -> EntrySpec | None:
         result = await self._get_nearest_future()
         if result is None:
             return None
@@ -140,7 +136,7 @@ class CashAndCarryStrategy(TwoLegStrategy):
 
         perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
         spot_price = perp_ticker.mark_price
-        days_to_expiry = (expiry - datetime.now(tz=timezone.utc)).days
+        days_to_expiry = (expiry - datetime.now(tz=UTC)).days
         locked_basis = BitMEXExchange.compute_annualised_basis(
             future_price, spot_price, days_to_expiry
         )
@@ -155,8 +151,8 @@ class CashAndCarryStrategy(TwoLegStrategy):
             logger.warning("cash_and_carry_insufficient_balance")
             return None
 
-        future_qty = usd_notional     # USD contracts (inverse) on the future
-        perp_qty = usd_notional       # USD contracts on the perp
+        future_qty = usd_notional  # USD contracts (inverse) on the future
+        perp_qty = usd_notional  # USD contracts on the perp
 
         return EntrySpec(
             leg_a=LegSpec(symbol=future_symbol, side="sell", qty=future_qty),

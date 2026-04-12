@@ -24,7 +24,6 @@ Entry flow across loop ticks:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import structlog
 
@@ -38,7 +37,7 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class LegSpec:
     symbol: str
-    side: str   # "buy" | "sell"
+    side: str  # "buy" | "sell"
     qty: float  # total target quantity (USD for inverse, base ccy for spot)
 
 
@@ -56,7 +55,7 @@ class TwoLegStrategy(Strategy):
     Subclasses provide signal logic and compute_entry_spec().
     """
 
-    async def compute_entry_spec(self) -> Optional[EntrySpec]:
+    async def compute_entry_spec(self) -> EntrySpec | None:
         """
         Compute leg symbols, sides, and total target quantities.
         Subclasses must implement this.
@@ -64,7 +63,7 @@ class TwoLegStrategy(Strategy):
         """
         raise NotImplementedError
 
-    async def enter(self) -> Optional[int]:
+    async def enter(self) -> int | None:
         spec = await self.compute_entry_spec()
         if spec is None:
             return None
@@ -78,7 +77,7 @@ class TwoLegStrategy(Strategy):
             leg_b_symbol=spec.leg_b.symbol,
             leg_b_side=spec.leg_b.side,
             leg_b_target_qty=spec.leg_b.qty,
-            entry_slices_total=0,   # dynamic — no fixed slice count
+            entry_slices_total=0,  # dynamic — no fixed slice count
             **spec.metadata,
         )
 
@@ -100,8 +99,13 @@ class TwoLegStrategy(Strategy):
         Called each loop tick while the position is in ENTERING state.
         Skips silently if orderbook depth is insufficient (tries again next tick).
         """
-        remaining_a = (position.leg_a_target_qty or 0) - (position.leg_a_qty or 0)
-        remaining_b = (position.leg_b_target_qty or 0) - (position.leg_b_qty or 0)
+        assert position.leg_a_symbol is not None
+        assert position.leg_a_side is not None
+        assert position.leg_b_symbol is not None
+        assert position.leg_b_side is not None
+
+        remaining_a = (position.leg_a_target_qty or 0.0) - position.leg_a_qty
+        remaining_b = (position.leg_b_target_qty or 0.0) - position.leg_b_qty
 
         filled = await self._order_mgr.fill_next_slice(
             position_id=position.id,
@@ -180,30 +184,49 @@ class TwoLegStrategy(Strategy):
             leg_b=position.leg_b_symbol,
         )
 
+        assert position.leg_a_symbol is not None
+        assert position.leg_a_side is not None
+        assert position.leg_b_symbol is not None
+        assert position.leg_b_side is not None
+
         await repository.update_position(position.id, state=PositionState.EXITING)
 
         # Close leg A (reverse the side: entry was "sell" → exit is "buy", and vice versa)
-        if position.leg_a_qty and position.leg_a_qty > 0:
+        if position.leg_a_qty > 0:
             exit_side_a = "buy" if position.leg_a_side == "sell" else "sell"
             order_a = await self._order_mgr.place_market(
                 position.leg_a_symbol, exit_side_a, position.leg_a_qty, emergency=True
             )
             await repository.record_trade(
-                position.id, self.name, "a", order_a.order_id,
-                position.leg_a_symbol, exit_side_a, order_a.filled_qty,
-                order_a.avg_price, order_a.fee, is_entry=False,
+                position.id,
+                self.name,
+                "a",
+                order_a.order_id,
+                position.leg_a_symbol,
+                exit_side_a,
+                order_a.filled_qty,
+                order_a.avg_price,
+                order_a.fee,
+                is_entry=False,
             )
 
         # Close leg B
-        if position.leg_b_qty and position.leg_b_qty > 0:
+        if position.leg_b_qty > 0:
             exit_side_b = "buy" if position.leg_b_side == "sell" else "sell"
             order_b = await self._order_mgr.place_market(
                 position.leg_b_symbol, exit_side_b, position.leg_b_qty, emergency=True
             )
             await repository.record_trade(
-                position.id, self.name, "b", order_b.order_id,
-                position.leg_b_symbol, exit_side_b, order_b.filled_qty,
-                order_b.avg_price, order_b.fee, is_entry=False,
+                position.id,
+                self.name,
+                "b",
+                order_b.order_id,
+                position.leg_b_symbol,
+                exit_side_b,
+                order_b.filled_qty,
+                order_b.avg_price,
+                order_b.fee,
+                is_entry=False,
             )
 
         realised_pnl = (position.unrealised_pnl or 0.0) + (position.realised_pnl or 0.0)

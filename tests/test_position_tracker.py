@@ -7,16 +7,17 @@ Covers:
   - Iteration bug regression: _live_positions.items() must unpack (symbol, pos) correctly
 """
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from engine.market_data import MarketDataCache
 from engine.position_tracker import PositionTracker
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_cache(instruments=None):
     """Return a MarketDataCache pre-populated with instrument snapshots."""
@@ -44,6 +45,7 @@ def make_tracker(positions=None, instruments=None):
 # ---------------------------------------------------------------------------
 # MarketDataCache.is_inverse_contract
 # ---------------------------------------------------------------------------
+
 
 class TestIsInverseContract:
     def test_inverse_from_instrument_cache(self):
@@ -92,6 +94,7 @@ class TestIsInverseContract:
 # ---------------------------------------------------------------------------
 # PositionTracker.get_net_delta_usd — contract-type correctness
 # ---------------------------------------------------------------------------
+
 
 class TestGetNetDeltaUsd:
     # -- baseline --

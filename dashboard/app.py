@@ -11,7 +11,9 @@ Pages:
 """
 
 import asyncio
+import concurrent.futures
 import sys
+import tomllib
 from pathlib import Path
 
 import ccxt.async_support as ccxt
@@ -34,8 +36,6 @@ st.set_page_config(
 # DB init (async → sync bridge for Streamlit)                         #
 # ------------------------------------------------------------------ #
 
-import concurrent.futures
-
 _db_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
@@ -46,10 +46,6 @@ def run_async(coro):
 
 
 def _load_db_url() -> str:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        import tomllib
     config_path = Path(__file__).parent.parent / "config" / "settings.toml"
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
@@ -68,24 +64,31 @@ _init_db()
 # Data loaders                                                         #
 # ------------------------------------------------------------------ #
 
+
 @st.cache_data(ttl=5)
 def load_positions():
     from engine.db import repository
+
     positions = run_async(repository.get_open_positions())
     if not positions:
         return pd.DataFrame()
-    return pd.DataFrame([{
-        "id": p.id,
-        "strategy": p.strategy,
-        "state": p.state,
-        "leg_a": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
-        "leg_b": f"{p.leg_b_side} {p.leg_b_qty or 0:.4f} {p.leg_b_symbol or ''}",
-        "locked_basis": f"{(p.locked_basis or 0) * 100:.2f}%" if p.locked_basis else "—",
-        "funding_paid": f"{(p.cumulative_funding_paid or 0) * 100:.4f}%",
-        "unrealised_pnl": p.unrealised_pnl or 0,
-        "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 5}",
-        "opened": p.opened_at,
-    } for p in positions])
+    return pd.DataFrame(
+        [
+            {
+                "id": p.id,
+                "strategy": p.strategy,
+                "state": p.state,
+                "leg_a": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
+                "leg_b": f"{p.leg_b_side} {p.leg_b_qty or 0:.4f} {p.leg_b_symbol or ''}",
+                "locked_basis": f"{(p.locked_basis or 0) * 100:.2f}%" if p.locked_basis else "—",
+                "funding_paid": f"{(p.cumulative_funding_paid or 0) * 100:.4f}%",
+                "unrealised_pnl": p.unrealised_pnl or 0,
+                "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 5}",
+                "opened": p.opened_at,
+            }
+            for p in positions
+        ]
+    )
 
 
 @st.cache_data(ttl=300)
@@ -95,6 +98,7 @@ def load_indicative_rates() -> dict:
     Returns a dict keyed by both ccxt symbol and native BitMEX symbol so callers
     can look up regardless of which format the DB uses.
     """
+
     async def _fetch():
         exchange = ccxt.bitmex({"enableRateLimit": True})
         try:
@@ -116,6 +120,7 @@ def load_indicative_rates() -> dict:
 @st.cache_data(ttl=30)
 def load_funding_summary():
     from engine.db import repository
+
     rows = run_async(repository.get_funding_summary())
     if not rows:
         return pd.DataFrame()
@@ -129,6 +134,7 @@ def load_funding_summary():
 @st.cache_data(ttl=60)
 def load_funding_symbols() -> list:
     from engine.db import repository
+
     symbols = run_async(repository.get_funding_symbols())
     return symbols or ["BTC/USD:BTC", "ETH/USD:BTC"]
 
@@ -136,14 +142,20 @@ def load_funding_symbols() -> list:
 @st.cache_data(ttl=60)
 def load_daily_funding_avg(symbol: str, days: int = 90):
     from engine.db import repository
+
     # Fetch enough 8h records to cover `days` of history (3 records/day)
     rates = run_async(repository.get_recent_funding(symbol, limit=days * 3))
     if not rates:
         return pd.DataFrame()
-    df = pd.DataFrame([{
-        "date": r.timestamp.date(),
-        "rate": r.funding_rate * 100,  # %/8h
-    } for r in rates])
+    df = pd.DataFrame(
+        [
+            {
+                "date": r.timestamp.date(),
+                "rate": r.funding_rate * 100,  # %/8h
+            }
+            for r in rates
+        ]
+    )
     daily = df.groupby("date")["rate"].mean().reset_index()
     daily.columns = ["date", "avg_rate_pct"]
     return daily.sort_values("date")
@@ -152,20 +164,27 @@ def load_daily_funding_avg(symbol: str, days: int = 90):
 @st.cache_data(ttl=5)
 def load_funding_rates(symbol: str, limit: int = 90):
     from engine.db import repository
+
     rates = run_async(repository.get_recent_funding(symbol, limit=limit))
     if not rates:
         return pd.DataFrame()
-    df = pd.DataFrame([{
-        "timestamp": r.timestamp,
-        "rate": r.funding_rate * 100,        # convert to %
-        "annual_rate": r.funding_rate_annual * 100,
-    } for r in rates])
+    df = pd.DataFrame(
+        [
+            {
+                "timestamp": r.timestamp,
+                "rate": r.funding_rate * 100,  # convert to %
+                "annual_rate": r.funding_rate_annual * 100,
+            }
+            for r in rates
+        ]
+    )
     return df.sort_values("timestamp")
 
 
 @st.cache_data(ttl=30)
 def load_risk_snapshots(limit: int = 50):
     from sqlalchemy import select
+
     from engine.db.models import RiskSnapshot, get_session
 
     async def _fetch():
@@ -178,12 +197,17 @@ def load_risk_snapshots(limit: int = 50):
     snaps = run_async(_fetch())
     if not snaps:
         return pd.DataFrame()
-    return pd.DataFrame([{
-        "timestamp": s.timestamp,
-        "delta_pct_nav": (s.net_delta_pct_nav or 0) * 100,
-        "margin_utilization": (s.margin_utilization or 0) * 100,
-        "nav_usd": s.nav or 0,
-    } for s in snaps]).sort_values("timestamp")
+    return pd.DataFrame(
+        [
+            {
+                "timestamp": s.timestamp,
+                "delta_pct_nav": (s.net_delta_pct_nav or 0) * 100,
+                "margin_utilization": (s.margin_utilization or 0) * 100,
+                "nav_usd": s.nav or 0,
+            }
+            for s in snaps
+        ]
+    ).sort_values("timestamp")
 
 
 # ------------------------------------------------------------------ #
@@ -193,17 +217,21 @@ def load_risk_snapshots(limit: int = 50):
 st.sidebar.title("BitMEX Delta-Neutral")
 st.sidebar.caption("Read-only monitoring dashboard")
 
-page = st.sidebar.radio("View", [
-    "Live Positions",
-    "Funding Rates",
-    "Risk",
-    "Smoke Test",
-    "Delta Check",
-])
+page = st.sidebar.radio(
+    "View",
+    [
+        "Live Positions",
+        "Funding Rates",
+        "Risk",
+        "Smoke Test",
+        "Delta Check",
+    ],
+)
 
 auto_refresh = st.sidebar.checkbox("Auto-refresh (5s)", value=True)
 if auto_refresh:
     import time
+
     st.sidebar.caption(f"Last refresh: {time.strftime('%H:%M:%S')}")
 
 # ------------------------------------------------------------------ #
@@ -248,12 +276,14 @@ elif page == "Funding Rates":
             ann = rate * 3 * 365 * 100
             return f"{pct:.4f}% ({ann:.0f}% ann.)"
 
-        display = pd.DataFrame({
-            "Symbol": summary["symbol"],
-            "Last rate (/8h)": summary["last_rate"].map(_fmt),
-            "Predicted next (/8h)": summary["symbol"].map(_predicted),
-            "10d daily avg (/8h)": summary["avg_10d"].map(_fmt),
-        })
+        display = pd.DataFrame(
+            {
+                "Symbol": summary["symbol"],
+                "Last rate (/8h)": summary["last_rate"].map(_fmt),
+                "Predicted next (/8h)": summary["symbol"].map(_predicted),
+                "10d daily avg (/8h)": summary["avg_10d"].map(_fmt),
+            }
+        )
         st.dataframe(display, width="stretch", hide_index=True)
 
     st.subheader("Daily average")
@@ -262,7 +292,9 @@ elif page == "Funding Rates":
     daily = load_daily_funding_avg(symbol, days=days)
 
     if daily.empty:
-        st.info(f"No funding rate data for {symbol}. Run the backfill script or wait for the engine to collect data.")
+        st.info(
+            f"No funding rate data for {symbol}. Run the backfill script or wait for the engine to collect data."
+        )
     else:
         overall_avg = daily["avg_rate_pct"].mean()
         col1, col2, col3 = st.columns(3)
@@ -273,22 +305,31 @@ elif page == "Funding Rates":
         daily["annualised"] = daily["avg_rate_pct"] * 3 * 365
 
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=daily["date"],
-            y=daily["avg_rate_pct"],
-            name="Daily avg funding %/8h",
-            marker_color=["#ef553b" if v < 0 else "#00cc96" for v in daily["avg_rate_pct"]],
-            customdata=daily["annualised"],
-            hovertemplate="%{x}<br>Annualised: %{customdata:.1f}%<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=daily["date"],
+                y=daily["avg_rate_pct"],
+                name="Daily avg funding %/8h",
+                marker_color=["#ef553b" if v < 0 else "#00cc96" for v in daily["avg_rate_pct"]],
+                customdata=daily["annualised"],
+                hovertemplate="%{x}<br>Annualised: %{customdata:.1f}%<extra></extra>",
+            )
+        )
         fig.add_hline(y=0, line_dash="solid", line_color="white", line_width=0.5)
-        fig.add_hline(y=0.01, line_dash="dash", line_color="orange", annotation_text="Baseline (0.01%)")
-        fig.add_hline(y=0.03, line_dash="dash", line_color="red", annotation_text="Entry threshold (0.03%)")
+        fig.add_hline(
+            y=0.01, line_dash="dash", line_color="orange", annotation_text="Baseline (0.01%)"
+        )
+        fig.add_hline(
+            y=0.03, line_dash="dash", line_color="red", annotation_text="Entry threshold (0.03%)"
+        )
         fig.update_layout(
             title=f"{symbol} — Daily Average Funding Rate",
             xaxis_title="Date",
             yaxis_title="Avg rate (%/8h)",
-            yaxis_range=[daily["avg_rate_pct"].min() * 1.1 if daily["avg_rate_pct"].min() < 0 else -0.05, 0.5],
+            yaxis_range=[
+                daily["avg_rate_pct"].min() * 1.1 if daily["avg_rate_pct"].min() < 0 else -0.05,
+                0.5,
+            ],
             bargap=0.2,
         )
         st.plotly_chart(fig, width="stretch")
@@ -302,19 +343,28 @@ elif page == "Risk":
     else:
         latest = snaps.iloc[-1]
         col1, col2, col3 = st.columns(3)
-        col1.metric("Net Delta % NAV", f"{latest['delta_pct_nav']:.3f}%",
-                    delta_color="inverse" if abs(latest["delta_pct_nav"]) > 0.3 else "normal")
-        col2.metric("Margin Utilization", f"{latest['margin_utilization']:.1f}%",
-                    delta_color="inverse" if latest["margin_utilization"] > 40 else "normal")
+        col1.metric(
+            "Net Delta % NAV",
+            f"{latest['delta_pct_nav']:.3f}%",
+            delta_color="inverse" if abs(latest["delta_pct_nav"]) > 0.3 else "normal",
+        )
+        col2.metric(
+            "Margin Utilization",
+            f"{latest['margin_utilization']:.1f}%",
+            delta_color="inverse" if latest["margin_utilization"] > 40 else "normal",
+        )
         col3.metric("NAV (USD)", f"${latest['nav_usd']:,.0f}")
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=snaps["timestamp"], y=snaps["margin_utilization"],
-            name="Margin Utilization %",
-            fill="tozeroy",
-            line=dict(color="#636efa"),
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=snaps["timestamp"],
+                y=snaps["margin_utilization"],
+                name="Margin Utilization %",
+                fill="tozeroy",
+                line=dict(color="#636efa"),
+            )
+        )
         fig.add_hline(y=40, line_dash="dash", line_color="orange", annotation_text="Warning (40%)")
         fig.add_hline(y=50, line_dash="dash", line_color="red", annotation_text="Hard stop (50%)")
         fig.update_layout(title="Margin Utilization Over Time", yaxis_range=[0, 60])
@@ -323,10 +373,16 @@ elif page == "Risk":
 elif page == "Smoke Test":
     st.title("Smoke Test")
     st.caption(
-        "Queues a one-shot integration test: enters a minimal 2-leg position "
-        "(short nearest BTC future + long XBTUSD perp, 100 USD) on testnet, "
-        "then exits on the next engine loop tick (~30s). "
-        "Results appear under Recent runs below and in Live Positions while active."
+        "One-shot integration test: enters a minimal 2-leg position "
+        "(short nearest BTC future + long XBTUSD perp) on testnet, "
+        "then exits on the next engine loop tick. "
+        "Trigger via the control CLI — the engine responds immediately."
+    )
+
+    st.info(
+        "**To run:** `python scripts/ctl.py smoke_test`\n\n"
+        "**To abort:** `python scripts/ctl.py smoke_test_abort`\n\n"
+        "Commands take effect within seconds (no polling delay)."
     )
 
     from engine.db import repository
@@ -334,45 +390,30 @@ elif page == "Smoke Test":
 
     # Load recent signals and positions (no cache — we want live status)
     signals = run_async(repository.get_recent_control_signals("smoke_test", limit=5))
-    pending_signals = [s for s in signals if s.consumed_at is None]
     positions = run_async(repository.get_positions_by_strategy("smoke_test", limit=5))
     in_flight = [p for p in positions if p.state != PositionState.IDLE]
 
-    # -- Run / Cancel buttons --
-    col_run, col_cancel = st.columns([1, 1])
+    if in_flight:
+        st.success(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
 
-    with col_run:
-        if pending_signals:
-            st.warning("Pending — engine picks up within 30s.")
-            st.button("Run Smoke Test", disabled=True, key="smoke_run")
-        elif in_flight:
-            st.info(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
-            st.button("Run Smoke Test", disabled=True, key="smoke_run")
-        else:
-            if st.button("Run Smoke Test", key="smoke_run"):
-                run_async(repository.create_control_signal("smoke_test"))
-                st.success("Signal queued.")
-                st.rerun()
-
-    with col_cancel:
-        can_cancel = bool(pending_signals or in_flight)
-        if st.button("Cancel / Abort", disabled=not can_cancel, type="secondary", key="smoke_abort"):
-            run_async(repository.create_control_signal("smoke_test_abort"))
-            st.warning("Abort signal queued. Engine will unwind and close within 30s.")
-            st.rerun()
     if positions:
         st.subheader("Recent runs")
         st.dataframe(
-            pd.DataFrame([{
-                "id": p.id,
-                "state": p.state,
-                "leg_a": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
-                "leg_b": f"{p.leg_b_side} {p.leg_b_qty or 0:.0f} {p.leg_b_symbol or ''}",
-                "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 1}",
-                "realised_pnl": p.realised_pnl or 0,
-                "opened": p.opened_at,
-                "closed": p.closed_at or "—",
-            } for p in positions]),
+            pd.DataFrame(
+                [
+                    {
+                        "id": p.id,
+                        "state": p.state,
+                        "leg_a": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
+                        "leg_b": f"{p.leg_b_side} {p.leg_b_qty or 0:.0f} {p.leg_b_symbol or ''}",
+                        "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 1}",
+                        "realised_pnl": p.realised_pnl or 0,
+                        "opened": p.opened_at,
+                        "closed": p.closed_at or "—",
+                    }
+                    for p in positions
+                ]
+            ),
             width="stretch",
         )
 
@@ -380,12 +421,19 @@ elif page == "Smoke Test":
     if signals:
         st.subheader("Signal history")
         st.dataframe(
-            pd.DataFrame([{
-                "id": s.id,
-                "created_at": s.created_at,
-                "consumed_at": s.consumed_at,
-                "status": "pending" if s.consumed_at is None else "consumed",
-            } for s in signals]),
+            pd.DataFrame(
+                [
+                    {
+                        "id": s.id,
+                        "created_at": s.created_at,
+                        "consumed_at": s.consumed_at,
+                        "status": "accepted"
+                        if s.consumed_at is not None
+                        else "rejected (queue full)",
+                    }
+                    for s in signals
+                ]
+            ),
             width="stretch",
         )
 
@@ -398,50 +446,39 @@ elif page == "Delta Check":
         "and that the delta guard correctly converts the spot leg from BTC to USD."
     )
 
+    st.info(
+        "**To run:** `python scripts/ctl.py delta_check`\n\n"
+        "**To abort:** `python scripts/ctl.py delta_check_abort`\n\n"
+        "Commands take effect within seconds (no polling delay)."
+    )
+
     from engine.db import repository
     from engine.db.models import PositionState
 
     signals = run_async(repository.get_recent_control_signals("delta_check", limit=5))
-    pending_signals = [s for s in signals if s.consumed_at is None]
     positions = run_async(repository.get_positions_by_strategy("delta_check", limit=5))
     in_flight = [p for p in positions if p.state != PositionState.IDLE]
 
-    col_run, col_cancel = st.columns([1, 1])
+    if in_flight:
+        st.success(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
 
-    with col_run:
-        if pending_signals:
-            st.warning("Pending — engine picks up within 30s.")
-            st.button("Run Delta Check", disabled=True, key="dc_run")
-        elif in_flight:
-            st.info(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
-            st.button("Run Delta Check", disabled=True, key="dc_run")
-        else:
-            if st.button("Run Delta Check", key="dc_run"):
-                run_async(repository.create_control_signal("delta_check"))
-                st.success("Signal queued. Engine will pick it up within 30s.")
-                st.rerun()
-
-    with col_cancel:
-        can_cancel = bool(pending_signals or in_flight)
-        if st.button("Cancel / Abort", disabled=not can_cancel, type="secondary", key="dc_abort"):
-            run_async(repository.create_control_signal("delta_check_abort"))
-            st.warning("Abort signal queued. Engine will unwind and close within 30s.")
-            st.rerun()
     if positions:
         st.subheader("Recent runs")
 
         rows = []
         for p in positions:
-            rows.append({
-                "id": p.id,
-                "state": p.state,
-                "leg_a (perp)": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
-                "leg_b (spot)": f"{p.leg_b_side} {p.leg_b_qty or 0:.6f} {p.leg_b_symbol or ''}",
-                "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 3}",
-                "realised_pnl": p.realised_pnl or 0,
-                "opened": p.opened_at,
-                "closed": p.closed_at or "—",
-            })
+            rows.append(
+                {
+                    "id": p.id,
+                    "state": p.state,
+                    "leg_a (perp)": f"{p.leg_a_side} {p.leg_a_qty or 0:.0f} {p.leg_a_symbol or ''}",
+                    "leg_b (spot)": f"{p.leg_b_side} {p.leg_b_qty or 0:.6f} {p.leg_b_symbol or ''}",
+                    "slices": f"{p.entry_slices_done or 0}/{p.entry_slices_total or 3}",
+                    "realised_pnl": p.realised_pnl or 0,
+                    "opened": p.opened_at,
+                    "closed": p.closed_at or "—",
+                }
+            )
 
         st.dataframe(pd.DataFrame(rows), width="stretch")
 
@@ -457,17 +494,25 @@ elif page == "Delta Check":
     if signals:
         st.subheader("Signal history")
         st.dataframe(
-            pd.DataFrame([{
-                "id": s.id,
-                "created_at": s.created_at,
-                "consumed_at": s.consumed_at,
-                "status": "pending" if s.consumed_at is None else "consumed",
-            } for s in signals]),
+            pd.DataFrame(
+                [
+                    {
+                        "id": s.id,
+                        "created_at": s.created_at,
+                        "consumed_at": s.consumed_at,
+                        "status": "accepted"
+                        if s.consumed_at is not None
+                        else "rejected (queue full)",
+                    }
+                    for s in signals
+                ]
+            ),
             width="stretch",
         )
 
 # Auto-refresh
 if auto_refresh:
     import time
+
     time.sleep(5)
     st.rerun()

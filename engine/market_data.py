@@ -18,8 +18,6 @@ a forward-looking signal for entry/exit decisions.
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 class MarketDataCache:
     """
@@ -29,7 +27,7 @@ class MarketDataCache:
     """
 
     def __init__(self) -> None:
-        self._funding: dict[str, dict] = {}      # symbol → latest settlement event
+        self._funding: dict[str, dict] = {}  # symbol → latest settlement event
         self._instruments: dict[str, dict] = {}  # symbol → latest instrument snapshot
 
     # ------------------------------------------------------------------
@@ -50,7 +48,7 @@ class MarketDataCache:
     # Read side — used by strategies and delta calculation
     # ------------------------------------------------------------------
 
-    def get_latest_funding_rate(self, symbol: str) -> Optional[float]:
+    def get_latest_funding_rate(self, symbol: str) -> float | None:
         """
         Return the most recent confirmed funding rate from a settlement event.
 
@@ -62,7 +60,7 @@ class MarketDataCache:
         """
         return self._funding.get(symbol, {}).get("fundingRate")
 
-    def get_predictive_funding_rate(self, symbol: str) -> Optional[float]:
+    def get_predictive_funding_rate(self, symbol: str) -> float | None:
         """
         Return the current indicative funding rate from the instrument stream.
 
@@ -77,11 +75,11 @@ class MarketDataCache:
         """
         return self._instruments.get(symbol, {}).get("fundingRate")
 
-    def get_mark_price(self, symbol: str) -> Optional[float]:
+    def get_mark_price(self, symbol: str) -> float | None:
         """Return the current mark price for a symbol from the instrument stream."""
         return self._instruments.get(symbol, {}).get("markPrice")
 
-    def get_last_price(self, symbol: str) -> Optional[float]:
+    def get_last_price(self, symbol: str) -> float | None:
         """Return the last traded price for a symbol from the instrument stream."""
         return self._instruments.get(symbol, {}).get("lastPrice")
 

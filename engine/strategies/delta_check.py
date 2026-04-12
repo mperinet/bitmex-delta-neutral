@@ -23,8 +23,6 @@ structured log as delta_check_result for the dashboard to display.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import structlog
 
 from engine.db.models import Position, PositionState
@@ -32,11 +30,11 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"       # ccxt symbol for order placement
-PERP_WS_SYMBOL = "XBTUSD"        # BitMEX native symbol in _live_positions
-SPOT_SYMBOL = "BTC/USDT"          # XBT_USDT spot
+PERP_SYMBOL = "BTC/USD:BTC"  # ccxt symbol for order placement
+PERP_WS_SYMBOL = "XBTUSD"  # BitMEX native symbol in _live_positions
+SPOT_SYMBOL = "BTC/USDT"  # XBT_USDT spot
 MIN_NOTIONAL_USD = 100.0
-DELTA_BALANCE_THRESHOLD = 0.02    # 2% imbalance triggers a warning in the log
+DELTA_BALANCE_THRESHOLD = 0.02  # 2% imbalance triggers a warning in the log
 
 
 class DeltaCheckStrategy(TwoLegStrategy):
@@ -44,11 +42,11 @@ class DeltaCheckStrategy(TwoLegStrategy):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._done = False           # set True after first successful exit
-        self._seen_active = False    # True once we've observed ACTIVE for one tick
-        self.observed_delta_usd: Optional[float] = None   # recorded while ACTIVE
-        self.observed_nav_usd: Optional[float] = None
-        self.delta_balanced: Optional[bool] = None        # True if |delta/nav| < threshold
+        self._done = False  # set True after first successful exit
+        self._seen_active = False  # True once we've observed ACTIVE for one tick
+        self.observed_delta_usd: float | None = None  # recorded while ACTIVE
+        self.observed_nav_usd: float | None = None
+        self.delta_balanced: bool | None = None  # True if |delta/nav| < threshold
 
     async def should_enter(self) -> bool:
         return not self._done
@@ -83,6 +81,7 @@ class DeltaCheckStrategy(TwoLegStrategy):
         try:
             ticker = await self._exchange.get_ticker(PERP_SYMBOL)
             btc_price = ticker.mark_price
+            assert self._tracker is not None
             nav = self._tracker.get_nav_usd(btc_price)
             delta = self._tracker.get_net_delta_usd()
 
@@ -106,7 +105,7 @@ class DeltaCheckStrategy(TwoLegStrategy):
         except Exception as e:
             logger.error("delta_check_observation_failed", error=str(e))
 
-    async def compute_entry_spec(self) -> Optional[EntrySpec]:
+    async def compute_entry_spec(self) -> EntrySpec | None:
         perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
         spot_ticker = await self._exchange.get_ticker(SPOT_SYMBOL)
         balance = await self._exchange.get_balance()
@@ -125,8 +124,8 @@ class DeltaCheckStrategy(TwoLegStrategy):
             )
             return None
 
-        perp_qty = usd_notional                           # USD contracts (inverse)
-        spot_qty = usd_notional / spot_ticker.ask         # BTC to buy
+        perp_qty = usd_notional  # USD contracts (inverse)
+        spot_qty = usd_notional / spot_ticker.ask  # BTC to buy
 
         logger.info(
             "delta_check_entry_spec",

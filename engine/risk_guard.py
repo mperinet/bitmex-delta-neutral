@@ -30,10 +30,8 @@ Decision tree (check_margin):
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
+from enum import StrEnum
 
 import structlog
 
@@ -43,7 +41,7 @@ from engine.exchange.base import ExchangeBase
 logger = structlog.get_logger(__name__)
 
 
-class RiskAction(str, Enum):
+class RiskAction(StrEnum):
     OK = "ok"
     WARNING = "warning"
     REBALANCE = "rebalance"
@@ -63,7 +61,7 @@ class RiskGuard:
     def __init__(
         self,
         exchange: ExchangeBase,
-        max_delta_pct_nav: float = 0.005,
+        max_delta_pct_nav: float = 0.02,
         max_margin_utilization: float = 0.50,
         margin_warning_level: float = 0.40,
         liquidation_buffer_pct: float = 0.10,
@@ -79,7 +77,7 @@ class RiskGuard:
         self._dms_interval = dms_interval_s
         self._dms_timeout = dms_timeout_s
         self._dms_reconnect_timeout = dms_reconnect_timeout_s
-        self._dms_task: Optional[asyncio.Task] = None
+        self._dms_task: asyncio.Task | None = None
         self._in_reconnect: bool = False
 
     # ------------------------------------------------------------------
@@ -134,9 +132,7 @@ class RiskGuard:
     # Delta check
     # ------------------------------------------------------------------
 
-    async def check_delta(
-        self, nav_usd: float, net_delta_usd: float
-    ) -> RiskResult:
+    async def check_delta(self, nav_usd: float, net_delta_usd: float) -> RiskResult:
         """
         net_delta_usd: positive = net long USD exposure, negative = net short.
         nav_usd: total portfolio value in USD for threshold calculation.

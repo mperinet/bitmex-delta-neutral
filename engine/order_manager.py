@@ -31,8 +31,6 @@ Market orders fill in milliseconds, so the orphan window is ~100ms.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Optional
 
 import structlog
 
@@ -42,9 +40,9 @@ from engine.exchange.base import ExchangeBase, OrderBook, OrderResult
 
 logger = structlog.get_logger(__name__)
 
-_REFILL_INTERVAL_S = 300      # 5 minutes
+_REFILL_INTERVAL_S = 300  # 5 minutes
 _BUCKET_CAPACITY = 300
-_EMERGENCY_RESERVE = 20       # strategies cannot drain below this
+_EMERGENCY_RESERVE = 20  # strategies cannot drain below this
 
 
 class RateLimitBucket:
@@ -58,7 +56,7 @@ class RateLimitBucket:
     def __init__(self, initial_tokens: int = _BUCKET_CAPACITY):
         self._tokens = min(initial_tokens, _BUCKET_CAPACITY)
         self._lock = asyncio.Lock()
-        self._refill_task: Optional[asyncio.Task] = None
+        self._refill_task: asyncio.Task | None = None
 
     def start(self) -> None:
         self._refill_task = asyncio.create_task(self._refill_loop())
@@ -174,7 +172,7 @@ class OrderManager:
         logger.info("order_cancelled", order_id=order_id, symbol=symbol, ok=ok)
         return ok
 
-    async def cancel_all(self, symbol: Optional[str] = None) -> int:
+    async def cancel_all(self, symbol: str | None = None) -> int:
         await self._bucket.acquire(emergency=True)
         count = await self._exchange.cancel_all_orders(symbol)
         logger.info("all_orders_cancelled", symbol=symbol, count=count)
@@ -277,7 +275,9 @@ class OrderManager:
             )
             unwind_side = "sell" if leg_a_side == "buy" else "buy"
             try:
-                await self.place_market(leg_a_symbol, unwind_side, order_a.filled_qty, emergency=True)
+                await self.place_market(
+                    leg_a_symbol, unwind_side, order_a.filled_qty, emergency=True
+                )
             except Exception as unwind_exc:
                 logger.critical(
                     "exchange_orphan_created",
@@ -292,33 +292,51 @@ class OrderManager:
 
         # Record fills
         await repository.record_trade(
-            position_id, strategy, "a", order_a.order_id,
-            leg_a_symbol, leg_a_side, order_a.filled_qty, order_a.avg_price,
-            order_a.fee, is_entry=True,
+            position_id,
+            strategy,
+            "a",
+            order_a.order_id,
+            leg_a_symbol,
+            leg_a_side,
+            order_a.filled_qty,
+            order_a.avg_price,
+            order_a.fee,
+            is_entry=True,
         )
         await repository.record_trade(
-            position_id, strategy, "b", order_b.order_id,
-            leg_b_symbol, leg_b_side, order_b.filled_qty, order_b.avg_price,
-            order_b.fee, is_entry=True,
+            position_id,
+            strategy,
+            "b",
+            order_b.order_id,
+            leg_b_symbol,
+            leg_b_side,
+            order_b.filled_qty,
+            order_b.avg_price,
+            order_b.fee,
+            is_entry=True,
         )
 
         # Update position quantities and state
         pos = await repository.get_position(position_id)
         if pos:
-            new_qty_a = (pos.leg_a_qty or 0) + order_a.filled_qty
-            new_qty_b = (pos.leg_b_qty or 0) + order_b.filled_qty
+            new_qty_a = pos.leg_a_qty + order_a.filled_qty
+            new_qty_b = pos.leg_b_qty + order_b.filled_qty
             new_avg_a = self._running_avg(
-                pos.leg_a_avg_entry, pos.leg_a_qty or 0,
-                order_a.avg_price, order_a.filled_qty,
+                pos.leg_a_avg_entry,
+                pos.leg_a_qty,
+                order_a.avg_price,
+                order_a.filled_qty,
             )
             new_avg_b = self._running_avg(
-                pos.leg_b_avg_entry, pos.leg_b_qty or 0,
-                order_b.avg_price, order_b.filled_qty,
+                pos.leg_b_avg_entry,
+                pos.leg_b_qty,
+                order_b.avg_price,
+                order_b.filled_qty,
             )
-            slices_done = (pos.entry_slices_done or 0) + 1
+            slices_done = pos.entry_slices_done + 1
 
-            new_remaining_a = (pos.leg_a_target_qty or 0) - new_qty_a
-            new_remaining_b = (pos.leg_b_target_qty or 0) - new_qty_b
+            new_remaining_a = (pos.leg_a_target_qty or 0.0) - new_qty_a
+            new_remaining_b = (pos.leg_b_target_qty or 0.0) - new_qty_b
             fully_filled = new_remaining_a <= 0 and new_remaining_b <= 0
 
             await repository.update_position(
@@ -378,7 +396,7 @@ class OrderManager:
 
     @staticmethod
     def _running_avg(
-        old_avg: Optional[float],
+        old_avg: float | None,
         old_qty: float,
         new_price: float,
         new_qty: float,

@@ -27,18 +27,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Optional
 
+import structlog
 import websockets
 
-from engine.market_data import MarketDataCache
-import structlog
-
 from engine.db import repository
-from engine.db.models import PositionState
 from engine.exchange.base import ExchangeBase
+from engine.market_data import MarketDataCache
 from engine.risk_guard import RiskGuard
 
 logger = structlog.get_logger(__name__)
@@ -62,7 +59,7 @@ class PositionTracker:
         ws_url: str,
         api_key: str,
         api_secret: str,
-        on_funding_payment: Optional[Callable] = None,
+        on_funding_payment: Callable | None = None,
     ):
         self._exchange = exchange
         self._risk_guard = risk_guard
@@ -79,7 +76,7 @@ class PositionTracker:
         self.market_data = MarketDataCache()
 
         self._ready = asyncio.Event()  # set once reconciliation completes
-        self._ws_task: Optional[asyncio.Task] = None
+        self._ws_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Startup reconciliation
@@ -221,7 +218,7 @@ class PositionTracker:
                 # large snapshots (e.g. instrument partial with 300+ items).
                 asyncio.create_task(self._safe_handle(raw))
 
-    async def _safe_handle(self, raw: str) -> None:
+    async def _safe_handle(self, raw: str | bytes) -> None:
         try:
             msg = json.loads(raw)
             await self._handle_message(msg)
@@ -244,7 +241,6 @@ class PositionTracker:
 
     async def _handle_message(self, msg: dict) -> None:
         table = msg.get("table")
-        action = msg.get("action")
         data = msg.get("data", [])
 
         if not table or not data:
@@ -295,7 +291,7 @@ class PositionTracker:
     # Accessors for strategies and risk guard
     # ------------------------------------------------------------------
 
-    def get_live_position(self, symbol: str) -> Optional[dict]:
+    def get_live_position(self, symbol: str) -> dict | None:
         return self._live_positions.get(symbol)
 
     def get_nav_usd(self, btc_price: float) -> float:
@@ -336,11 +332,7 @@ class PositionTracker:
             if self.market_data.is_inverse_contract(symbol):
                 total += qty
             else:
-                mark_price = (
-                    pos.get("markPrice")
-                    or self.market_data.get_mark_price(symbol)
-                    or 0.0
-                )
+                mark_price = pos.get("markPrice") or self.market_data.get_mark_price(symbol) or 0.0
                 if mark_price > 0:
                     total += qty * mark_price
                 else:

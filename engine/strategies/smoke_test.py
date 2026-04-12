@@ -25,8 +25,6 @@ Tick sequence (assuming enough depth each tick):
 
 from __future__ import annotations
 
-from typing import Optional
-
 import structlog
 
 from engine.db.models import Position, PositionState
@@ -43,8 +41,8 @@ class SmokeTestStrategy(TwoLegStrategy):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._done = False          # set True after first successful exit
-        self._seen_active = False   # True once we've observed ACTIVE for one tick
+        self._done = False  # set True after first successful exit
+        self._seen_active = False  # True once we've observed ACTIVE for one tick
 
     async def should_enter(self) -> bool:
         return not self._done
@@ -70,13 +68,10 @@ class SmokeTestStrategy(TwoLegStrategy):
             logger.info("smoke_test_complete", position_id=position.id)
         return result
 
-    async def compute_entry_spec(self) -> Optional[EntrySpec]:
+    async def compute_entry_spec(self) -> EntrySpec | None:
         # Find nearest BTC quarterly future
         futures = await self._exchange.get_active_futures()
-        btc_futures = [
-            f for f in futures
-            if "BTC" in f.get("base", "") and f.get("expiry")
-        ]
+        btc_futures = [f for f in futures if "BTC" in f.get("base", "") and f.get("expiry")]
         if not btc_futures:
             logger.error("smoke_test_no_btc_futures_found")
             return None

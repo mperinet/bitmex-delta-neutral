@@ -4,7 +4,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 
 from engine.exchange.base import Balance
 from engine.risk_guard import RiskAction, RiskGuard
@@ -13,9 +12,7 @@ from engine.risk_guard import RiskAction, RiskGuard
 @pytest.fixture
 def mock_exchange():
     exchange = MagicMock()
-    exchange.get_balance = AsyncMock(return_value=Balance(
-        available=1.0, total=2.0, currency="BTC"
-    ))
+    exchange.get_balance = AsyncMock(return_value=Balance(available=1.0, total=2.0, currency="BTC"))
     exchange.cancel_all_after = AsyncMock()
     return exchange
 
@@ -24,7 +21,7 @@ def mock_exchange():
 def risk_guard(mock_exchange):
     return RiskGuard(
         exchange=mock_exchange,
-        max_delta_pct_nav=0.005,     # 0.5%
+        max_delta_pct_nav=0.005,  # 0.5% — threshold sits between test values 0.4% and 0.6%
         max_margin_utilization=0.50,
         margin_warning_level=0.40,
         liquidation_buffer_pct=0.10,
@@ -37,6 +34,7 @@ def risk_guard(mock_exchange):
 # ------------------------------------------------------------------ #
 # Delta check                                                          #
 # ------------------------------------------------------------------ #
+
 
 @pytest.mark.asyncio
 async def test_delta_within_bounds(risk_guard):
@@ -61,6 +59,7 @@ async def test_delta_zero_nav(risk_guard):
 # ------------------------------------------------------------------ #
 # Margin check                                                         #
 # ------------------------------------------------------------------ #
+
 
 @pytest.mark.asyncio
 async def test_margin_ok(risk_guard, mock_exchange):
@@ -93,6 +92,7 @@ async def test_margin_hard_stop(risk_guard, mock_exchange):
 # ------------------------------------------------------------------ #
 # Funding circuit breaker (Strategy 1)                                #
 # ------------------------------------------------------------------ #
+
 
 def test_funding_circuit_breaker_not_triggered(risk_guard):
     # Paid 49% of locked basis → should NOT exit
@@ -134,6 +134,7 @@ def test_funding_circuit_breaker_no_locked_basis(risk_guard):
 # Liquidation buffer                                                   #
 # ------------------------------------------------------------------ #
 
+
 def test_liquidation_buffer_healthy_long(risk_guard):
     result = risk_guard.check_liquidation_buffer(
         current_price=50000, liquidation_price=40000, side="long"
@@ -159,6 +160,7 @@ def test_liquidation_buffer_warning_short(risk_guard):
 # ------------------------------------------------------------------ #
 # Dead-man's switch                                                    #
 # ------------------------------------------------------------------ #
+
 
 @pytest.mark.asyncio
 async def test_dms_called_on_start(risk_guard, mock_exchange):
@@ -189,6 +191,7 @@ async def test_dms_reconnect_extends_timeout(risk_guard, mock_exchange):
 # delta guard.                                                          #
 # ------------------------------------------------------------------ #
 
+
 def test_position_tracker_delta_reads_dict_not_tuple():
     """
     get_net_delta_usd() must iterate _live_positions.items() and read
@@ -196,8 +199,8 @@ def test_position_tracker_delta_reads_dict_not_tuple():
     wrong, it returns 0 regardless of actual position sizes and the
     REBALANCE guard never fires.
     """
-    from engine.position_tracker import PositionTracker
     from engine.market_data import MarketDataCache
+    from engine.position_tracker import PositionTracker
 
     tracker = PositionTracker.__new__(PositionTracker)
     tracker.market_data = MarketDataCache()  # no live price data in this unit test
@@ -215,8 +218,8 @@ def test_position_tracker_delta_reads_dict_not_tuple():
     # Two inverse legs that cancel: short XBTUSD perp + long quarterly future
     # Both are inverse (no '_' in symbol, defaulting to True without cache)
     tracker._live_positions = {
-        "XBTUSD":    {"currentQty": -10000},
-        "XBTUSDTZ25": {"currentQty":  10000},
+        "XBTUSD": {"currentQty": -10000},
+        "XBTUSDTZ25": {"currentQty": 10000},
     }
     delta_net = tracker.get_net_delta_usd()
     assert delta_net == pytest.approx(0.0)  # hedged → zero net delta

@@ -13,18 +13,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class OrderResult:
     order_id: str
     symbol: str
-    side: str           # "buy" | "sell"
+    side: str  # "buy" | "sell"
     qty: float
     filled_qty: float
     avg_price: float
-    status: str         # "open" | "closed" | "canceled"
+    status: str  # "open" | "closed" | "canceled"
     fee: float
 
 
@@ -39,8 +38,8 @@ class Ticker:
 
 @dataclass
 class Balance:
-    available: float    # available margin (in BTC for inverse, USDT for linear)
-    total: float        # total wallet balance
+    available: float  # available margin (in BTC for inverse, USDT for linear)
+    total: float  # total wallet balance
     currency: str
 
 
@@ -63,12 +62,11 @@ class ExchangeBase(ABC):
     async def place_limit_order(
         self,
         symbol: str,
-        side: str,          # "buy" | "sell"
+        side: str,  # "buy" | "sell"
         qty: float,
         price: float,
         post_only: bool = True,
-    ) -> OrderResult:
-        ...
+    ) -> OrderResult: ...
 
     @abstractmethod
     async def place_market_order(
@@ -76,29 +74,24 @@ class ExchangeBase(ABC):
         symbol: str,
         side: str,
         qty: float,
-    ) -> OrderResult:
-        ...
+    ) -> OrderResult: ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        ...
+    async def cancel_order(self, order_id: str, symbol: str) -> bool: ...
 
     @abstractmethod
-    async def cancel_all_orders(self, symbol: Optional[str] = None) -> int:
+    async def cancel_all_orders(self, symbol: str | None = None) -> int:
         """Cancel all open orders. Returns count cancelled."""
         ...
 
     @abstractmethod
-    async def get_order(self, order_id: str, symbol: str) -> OrderResult:
-        ...
+    async def get_order(self, order_id: str, symbol: str) -> OrderResult: ...
 
     @abstractmethod
-    async def get_ticker(self, symbol: str) -> Ticker:
-        ...
+    async def get_ticker(self, symbol: str) -> Ticker: ...
 
     @abstractmethod
-    async def get_balance(self) -> Balance:
-        ...
+    async def get_balance(self) -> Balance: ...
 
     @abstractmethod
     async def get_open_positions(self) -> list[dict]:
@@ -108,4 +101,14 @@ class ExchangeBase(ABC):
     @abstractmethod
     async def fetch_orderbook(self, symbol: str, depth: int = 25) -> OrderBook:
         """Return order book for slippage-aware slice sizing."""
+        ...
+
+    @abstractmethod
+    async def cancel_all_after(self, timeout_ms: int) -> None:
+        """Dead-man's switch: cancel all orders if not refreshed within timeout_ms."""
+        ...
+
+    @abstractmethod
+    async def get_active_futures(self) -> list[dict]:
+        """Return all active (non-expired, non-swap) futures contracts."""
         ...

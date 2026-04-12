@@ -5,14 +5,14 @@ Inverse contract math tests are marked as CRITICAL and must pass
 before any live deployment. PnL = notional * (1/entry - 1/exit).
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from engine.exchange.bitmex import BitMEXExchange
-from engine.exchange.base import Balance, Ticker
-from engine.db.models import Position, PositionState
-from engine.risk_guard import RiskAction
+import pytest
 
+from engine.db.models import Position, PositionState
+from engine.exchange.base import Balance, Ticker
+from engine.exchange.bitmex import BitMEXExchange
+from engine.risk_guard import RiskAction
 
 # ================================================================== #
 # CRITICAL: Inverse contract math                                      #
@@ -20,12 +20,13 @@ from engine.risk_guard import RiskAction
 # contracts. A wrong division order inverts delta neutrality.          #
 # ================================================================== #
 
+
 class TestInverseContractMath:
     def test_long_profit(self):
         """Long 1000 USD, price goes up: should profit in BTC."""
         pnl = BitMEXExchange.inverse_pnl(1000, entry_price=50000, exit_price=60000)
         assert pnl > 0
-        assert pnl == pytest.approx(1000 * (1/50000 - 1/60000))
+        assert pnl == pytest.approx(1000 * (1 / 50000 - 1 / 60000))
 
     def test_long_loss(self):
         """Long 1000 USD, price goes down: should lose in BTC."""
@@ -70,7 +71,7 @@ class TestInverseContractMath:
         basis = BitMEXExchange.compute_annualised_basis(
             future_price=51000, spot_price=50000, days_to_expiry=90
         )
-        expected = (51000/50000 - 1) * (365/90)
+        expected = (51000 / 50000 - 1) * (365 / 90)
         assert basis == pytest.approx(expected)
 
     def test_annualised_basis_zero_days_raises(self):
@@ -81,6 +82,7 @@ class TestInverseContractMath:
 # ================================================================== #
 # Strategy 2: Funding Harvest entry/exit signals                       #
 # ================================================================== #
+
 
 def make_position(**kwargs):
     defaults = dict(
@@ -115,12 +117,14 @@ class TestFundingHarvestStrategy:
         tracker.wait_ready = AsyncMock()
 
         exchange = MagicMock()
-        exchange.get_ticker = AsyncMock(return_value=Ticker(
-            symbol="BTC/USD:BTC", bid=49990, ask=50010, last=50000, mark_price=50000
-        ))
-        exchange.get_balance = AsyncMock(return_value=Balance(
-            available=1.0, total=2.0, currency="BTC"
-        ))
+        exchange.get_ticker = AsyncMock(
+            return_value=Ticker(
+                symbol="BTC/USD:BTC", bid=49990, ask=50010, last=50000, mark_price=50000
+            )
+        )
+        exchange.get_balance = AsyncMock(
+            return_value=Balance(available=1.0, total=2.0, currency="BTC")
+        )
 
         risk = MagicMock()
         risk.check_margin = AsyncMock(return_value=MagicMock(action=RiskAction.OK))
@@ -182,6 +186,7 @@ class TestFundingHarvestStrategy:
 # Strategy 1: Cash-and-Carry circuit breaker (via risk guard)          #
 # ================================================================== #
 
+
 class TestCashAndCarryCircuitBreaker:
     """
     These tests use the risk_guard.check_funding_circuit_breaker() directly
@@ -190,6 +195,7 @@ class TestCashAndCarryCircuitBreaker:
 
     def test_60_periods_at_baseline_does_not_trigger(self):
         from engine.risk_guard import RiskGuard
+
         rg = RiskGuard(exchange=MagicMock(), max_delta_pct_nav=0.005)
 
         # 60 × 0.01%/8h = 0.6% cumulative; locked basis = 15%
@@ -202,6 +208,7 @@ class TestCashAndCarryCircuitBreaker:
 
     def test_circuit_breaker_fires_when_funding_erodes_basis(self):
         from engine.risk_guard import RiskGuard
+
         rg = RiskGuard(exchange=MagicMock(), max_delta_pct_nav=0.005)
 
         # Basis = 10%, funding eaten = 5.1% → ratio = 51% → exit
@@ -213,12 +220,14 @@ class TestCashAndCarryCircuitBreaker:
 
     def test_exactly_50_percent_triggers(self):
         from engine.risk_guard import RiskGuard
+
         rg = RiskGuard(exchange=MagicMock(), max_delta_pct_nav=0.005)
         result = rg.check_funding_circuit_breaker(0.05, locked_basis=0.10)
         assert result.action == RiskAction.EXIT_STRATEGY
 
     def test_49_percent_does_not_trigger(self):
         from engine.risk_guard import RiskGuard
+
         rg = RiskGuard(exchange=MagicMock(), max_delta_pct_nav=0.005)
         result = rg.check_funding_circuit_breaker(0.0499, locked_basis=0.10)
         assert result.action == RiskAction.OK
@@ -230,6 +239,7 @@ class TestCashAndCarryCircuitBreaker:
 # instead of "short". Wrong comparison doubled shorts instead of       #
 # closing them.                                                         #
 # ================================================================== #
+
 
 class TestExitSideReversal:
     """
@@ -265,12 +275,13 @@ class TestExitSideReversal:
     async def test_short_leg_exits_with_buy(self):
         """Leg A stored as side='sell' must produce a 'buy' exit order."""
         from engine.db.models import PositionState
+
         strategy, order_mgr = self._make_two_leg_strategy()
 
         pos = make_position(
-            leg_a_side="sell",   # short perp → exit must be "buy"
+            leg_a_side="sell",  # short perp → exit must be "buy"
             leg_a_qty=10000.0,
-            leg_b_side="buy",    # long spot → exit must be "sell"
+            leg_b_side="buy",  # long spot → exit must be "sell"
             leg_b_qty=0.2,
             state=PositionState.ACTIVE,
         )
@@ -304,10 +315,11 @@ class TestExitSideReversal:
     async def test_long_leg_exits_with_sell(self):
         """Leg A stored as side='buy' must produce a 'sell' exit order."""
         from engine.db.models import PositionState
+
         strategy, order_mgr = self._make_two_leg_strategy()
 
         pos = make_position(
-            leg_a_side="buy",   # long leg → exit must be "sell"
+            leg_a_side="buy",  # long leg → exit must be "sell"
             leg_a_qty=10000.0,
             leg_b_side="sell",  # short leg → exit must be "buy"
             leg_b_qty=0.2,
@@ -342,6 +354,7 @@ class TestExitSideReversal:
 # Strategy 2: Cumulative funding cost circuit breaker                 #
 # ================================================================== #
 
+
 class TestFundingHarvestCumulativeCost:
     """
     Funding harvest should exit when cumulative_funding_paid exceeds
@@ -350,6 +363,7 @@ class TestFundingHarvestCumulativeCost:
 
     def _make_strategy_with_rate(self, funding_rate=0.0003):
         from engine.strategies.funding_harvest import FundingHarvestStrategy
+
         tracker = MagicMock()
         tracker.market_data.get_predictive_funding_rate = MagicMock(return_value=funding_rate)
         return FundingHarvestStrategy(

@@ -199,23 +199,22 @@ def test_position_tracker_delta_reads_dict_not_tuple():
     from engine.position_tracker import PositionTracker
 
     tracker = PositionTracker.__new__(PositionTracker)
-    tracker._live_positions = {
-        "BTC/USD:BTC": {"currentQty": -10000, "symbol": "BTC/USD:BTC"},
-        "BTC/USDT":    {"currentQty":  10000, "symbol": "BTC/USDT"},
-    }
+    tracker._live_instruments = {}  # no live price data in this unit test
 
+    # Single inverse position: short $10k XBTUSD — currentQty is already in USD
+    tracker._live_positions = {
+        "XBTUSD": {"currentQty": -10000},
+    }
     delta = tracker.get_net_delta_usd()
-    # Net of -10000 + 10000 = 0 for a perfectly hedged book,
-    # but the sum must NOT be silently 0 due to the tuple-indexing bug.
-    # We verify the method can actually read the qty from the dict.
-    assert delta == pytest.approx(0.0)  # hedged → zero delta (correct)
-
-    # Unhedged: one leg only
-    tracker._live_positions = {
-        "BTC/USD:BTC": {"currentQty": -10000, "symbol": "BTC/USD:BTC"},
-    }
-    delta_unhedged = tracker.get_net_delta_usd()
-    assert delta_unhedged == pytest.approx(-10000.0), (
-        f"Expected -10000 but got {delta_unhedged}. "
+    assert delta == pytest.approx(-10000.0), (
+        f"Expected -10000 but got {delta}. "
         "If 0, the bug is back: .get() is being called on the tuple not the dict."
     )
+
+    # Two inverse legs that cancel (long + short same notional)
+    tracker._live_positions = {
+        "XBTUSD": {"currentQty": -10000},
+        "ETHUSD": {"currentQty":  10000},
+    }
+    delta_net = tracker.get_net_delta_usd()
+    assert delta_net == pytest.approx(0.0)  # hedged → zero net delta

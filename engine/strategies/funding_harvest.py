@@ -68,6 +68,12 @@ class FundingHarvestStrategy(TwoLegStrategy):
         )
         return signal
 
+    @property
+    def _max_cumulative_funding_cost(self) -> float:
+        """Exit if cumulative net cost (positive = paid) exceeds this fraction.
+        Default 0.002 = 20bps, roughly 20 adverse 8h periods at baseline."""
+        return self._config.get("max_cumulative_funding_cost", 0.002)
+
     async def should_exit(self, position: Position) -> bool:
         rate = self._tracker.get_latest_funding_rate(PERP_WS_SYMBOL)
 
@@ -91,6 +97,18 @@ class FundingHarvestStrategy(TwoLegStrategy):
                 "funding_harvest_exit_rate_normalised",
                 rate=rate,
                 threshold=self._exit_funding_rate,
+                position_id=position.id,
+            )
+            return True
+
+        # Circuit breaker: cumulative net cost exceeds threshold.
+        # positive cumulative_funding_paid = net paid (bad for this strategy).
+        cumulative = position.cumulative_funding_paid or 0.0
+        if cumulative > self._max_cumulative_funding_cost:
+            logger.warning(
+                "funding_harvest_exit_cumulative_cost_circuit_breaker",
+                cumulative_funding_paid=cumulative,
+                threshold=self._max_cumulative_funding_cost,
                 position_id=position.id,
             )
             return True

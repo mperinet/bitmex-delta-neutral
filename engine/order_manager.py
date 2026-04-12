@@ -238,7 +238,18 @@ class OrderManager:
                 error=str(exc),
             )
             unwind_side = "sell" if leg_a_side == "buy" else "buy"
-            await self.place_market(leg_a_symbol, unwind_side, order_a.filled_qty, emergency=True)
+            try:
+                await self.place_market(leg_a_symbol, unwind_side, order_a.filled_qty, emergency=True)
+            except Exception as unwind_exc:
+                logger.critical(
+                    "exchange_orphan_created",
+                    position_id=position_id,
+                    symbol=leg_a_symbol,
+                    side=leg_a_side,
+                    qty=order_a.filled_qty,
+                    unwind_error=str(unwind_exc),
+                    note="leg A filled but unwind failed — manual close required on exchange",
+                )
             raise
 
         # Record fills

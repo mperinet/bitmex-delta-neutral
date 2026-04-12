@@ -169,14 +169,30 @@ class PositionTracker:
                 self._risk_guard.set_reconnecting(True)
                 await asyncio.sleep(2)
 
-                try:
-                    await self.reconcile_with_exchange()
-                except Exception as rec_err:
-                    logger.error("reconciliation_failed", error=str(rec_err))
+                reconciled = False
+                for attempt in range(3):
+                    try:
+                        await self.reconcile_with_exchange()
+                        reconciled = True
+                        break
+                    except Exception as rec_err:
+                        logger.error(
+                            "reconciliation_failed",
+                            attempt=attempt + 1,
+                            error=str(rec_err),
+                        )
+                        if attempt < 2:
+                            await asyncio.sleep(5)
 
                 self._risk_guard.set_reconnecting(False)
-                self._ready.set()
-                logger.info("ws_reconnected_and_reconciled")
+                if reconciled:
+                    self._ready.set()
+                    logger.info("ws_reconnected_and_reconciled")
+                else:
+                    logger.critical(
+                        "reconciliation_exhausted_retries",
+                        note="strategies remain paused — manual intervention required",
+                    )
 
             except asyncio.CancelledError:
                 return
@@ -286,13 +302,31 @@ class PositionTracker:
     def get_net_delta_usd(self) -> float:
         """
         Sum of all open position deltas in USD.
-        For inverse contracts: delta = currentQty (in USD contracts).
-        For spot: delta = qty * price.
+
+        BitMEX conventions:
+          - Inverse (XBTUSD, ETHUSD ...): currentQty is in USD contracts. Signed.
+          - Spot/linear (XBT_USDT ...): currentQty is in BTC. Multiply by last price.
+
+        We distinguish by native symbol suffix: inverse symbols end in "USD" but
+        NOT "USDT". Spot/linear end in "USDT" or contain an underscore.
         """
         total = 0.0
-        for _symbol, pos in self._live_positions.items():
+        for symbol, pos in self._live_positions.items():
             qty = pos.get("currentQty", 0)
-            total += qty  # For inverse: currentQty is already in USD
+            if not qty:
+                continue
+            # Inverse: qty is already denominated in USD
+            if symbol.endswith("USD") and not symbol.endswith("USDT"):
+                total += qty
+            else:
+                # Spot/linear: qty is in BTC (or other base), convert to USD
+                last_price = (
+                    self._live_instruments.get(symbol, {}).get("lastPrice")
+                    or pos.get("markPrice")
+                    or pos.get("currentPrice")
+                    or 0
+                )
+                total += qty * last_price
         return total
 
     def get_latest_funding_rate(self, symbol: str) -> Optional[float]:

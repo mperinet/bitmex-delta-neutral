@@ -115,10 +115,19 @@ class RiskGuard:
                 logger.error(
                     "dead_mans_switch_failed",
                     error=str(e),
-                    retrying_in_s=self._dms_interval,
+                    action="retrying_immediately",
                 )
-                # Retry immediately on the next cycle — do NOT sleep longer
-                # A failed refresh means orders could cancel unexpectedly
+                # Retry once immediately — a stale timer risks auto-cancelling all orders
+                await asyncio.sleep(2)
+                try:
+                    await self._exchange.cancel_all_after(timeout * 1000)
+                    logger.info("dead_mans_switch_retry_succeeded")
+                except Exception as e2:
+                    logger.critical(
+                        "dead_mans_switch_retry_also_failed",
+                        error=str(e2),
+                        note="orders may auto-cancel if exchange is unreachable",
+                    )
             await asyncio.sleep(self._dms_interval)
 
     # ------------------------------------------------------------------

@@ -336,3 +336,49 @@ class TestExitSideReversal:
 
         _sym_b, side_b, _qty_b = calls[1].args[:3]
         assert side_b == "buy", f"Expected 'buy' to close short leg, got '{side_b}'"
+
+
+# ================================================================== #
+# Strategy 2: Cumulative funding cost circuit breaker                 #
+# ================================================================== #
+
+class TestFundingHarvestCumulativeCost:
+    """
+    Funding harvest should exit when cumulative_funding_paid exceeds
+    the configured threshold, even if the current rate looks acceptable.
+    """
+
+    def _make_strategy_with_rate(self, funding_rate=0.0003):
+        from engine.strategies.funding_harvest import FundingHarvestStrategy
+        tracker = MagicMock()
+        tracker.get_latest_funding_rate = MagicMock(return_value=funding_rate)
+        return FundingHarvestStrategy(
+            exchange=MagicMock(),
+            order_manager=MagicMock(),
+            position_tracker=tracker,
+            risk_guard=MagicMock(),
+            config={
+                "min_funding_rate": 0.0001,
+                "entry_threshold_multiplier": 3,
+                "max_position_usd": 10000,
+                "max_cumulative_funding_cost": 0.002,  # 20bps threshold
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_exit_when_cumulative_cost_exceeded(self):
+        s = self._make_strategy_with_rate(funding_rate=0.0005)  # rate still elevated → would hold
+        pos = make_position(cumulative_funding_paid=0.0021)  # but cumulative cost is over threshold
+        assert await s.should_exit(pos) is True
+
+    @pytest.mark.asyncio
+    async def test_no_exit_when_cumulative_cost_below_threshold(self):
+        s = self._make_strategy_with_rate(funding_rate=0.0005)
+        pos = make_position(cumulative_funding_paid=0.0019)  # just under threshold
+        assert await s.should_exit(pos) is False
+
+    @pytest.mark.asyncio
+    async def test_no_exit_when_cumulative_is_negative_income(self):
+        s = self._make_strategy_with_rate(funding_rate=0.0005)
+        pos = make_position(cumulative_funding_paid=-0.01)  # we received income → fine
+        assert await s.should_exit(pos) is False

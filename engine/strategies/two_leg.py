@@ -124,6 +124,49 @@ class TwoLegStrategy(Strategy):
                 reason="insufficient_depth",
             )
 
+    async def force_abort(self) -> None:
+        """
+        Forcefully unwind any in-flight positions for this strategy.
+
+        Called when an operator queues an abort control signal from the dashboard.
+        Works on any position state (ENTERING, ACTIVE, EXITING). Unwinds whatever
+        has been filled so far on both legs using emergency market orders, closes
+        the DB record, and marks the strategy instance as done so it won't re-enter.
+
+        Uses exit() directly — exit() already unwinds only what's been filled
+        (leg_a_qty / leg_b_qty) rather than the target quantity, so it's correct
+        for partially-filled ENTERING positions too.
+        """
+        open_positions = await repository.get_open_positions(strategy=self.name)
+        if not open_positions:
+            logger.info("force_abort_no_open_positions", strategy=self.name)
+            self._done = True
+            return
+
+        for pos in open_positions:
+            logger.warning(
+                "force_abort_unwinding",
+                strategy=self.name,
+                position_id=pos.id,
+                state=pos.state,
+                leg_a_filled=pos.leg_a_qty,
+                leg_b_filled=pos.leg_b_qty,
+            )
+            try:
+                await self.exit(pos)
+            except Exception as e:
+                logger.error(
+                    "force_abort_exit_failed",
+                    strategy=self.name,
+                    position_id=pos.id,
+                    error=str(e),
+                )
+                # Mark closed in DB even if unwind failed — operator must check exchange
+                await repository.close_position(pos.id, realised_pnl=0.0)
+
+        self._done = True
+        logger.info("force_abort_complete", strategy=self.name)
+
     async def exit(self, position: Position) -> bool:
         """
         Close both legs with market orders.

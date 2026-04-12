@@ -174,6 +174,29 @@ async def run(config: dict) -> None:
 
     try:
         while True:
+            # -- Abort signals (checked before run_once so they take effect this tick) --
+            abort_smoke = await repository.get_pending_control_signal("smoke_test_abort")
+            if abort_smoke:
+                await repository.consume_control_signal(abort_smoke.id)
+                if smoke_strategy is not None:
+                    logger.warning("smoke_test_abort_received", signal_id=abort_smoke.id)
+                    try:
+                        await smoke_strategy.force_abort()
+                    except Exception as e:
+                        logger.error("smoke_test_abort_error", error=str(e))
+                        smoke_strategy._done = True
+
+            abort_delta = await repository.get_pending_control_signal("delta_check_abort")
+            if abort_delta:
+                await repository.consume_control_signal(abort_delta.id)
+                if delta_check_strategy is not None:
+                    logger.warning("delta_check_abort_received", signal_id=abort_delta.id)
+                    try:
+                        await delta_check_strategy.force_abort()
+                    except Exception as e:
+                        logger.error("delta_check_abort_error", error=str(e))
+                        delta_check_strategy._done = True
+
             # -- Smoke test signal check --
             if smoke_strategy is None or smoke_strategy._done:
                 signal = await repository.get_pending_control_signal("smoke_test")

@@ -330,25 +330,36 @@ elif page == "Smoke Test":
     )
 
     from engine.db import repository
+    from engine.db.models import PositionState
 
-    # Load recent signals (no cache — we want live status)
+    # Load recent signals and positions (no cache — we want live status)
     signals = run_async(repository.get_recent_control_signals("smoke_test", limit=5))
-    pending = [s for s in signals if s.consumed_at is None]
-
-    if pending:
-        st.warning(
-            "Smoke test pending — the engine will pick it up on its next loop tick (~30s). "
-            "You can queue another once the engine consumes this one."
-        )
-        st.button("Run Smoke Test", disabled=True)
-    else:
-        if st.button("Run Smoke Test"):
-            run_async(repository.create_control_signal("smoke_test"))
-            st.success("Signal queued. Engine will pick it up within 30s.")
-            st.rerun()
-
-    # Recent smoke test positions (all states, newest first)
+    pending_signals = [s for s in signals if s.consumed_at is None]
     positions = run_async(repository.get_positions_by_strategy("smoke_test", limit=5))
+    in_flight = [p for p in positions if p.state != PositionState.IDLE]
+
+    # -- Run / Cancel buttons --
+    col_run, col_cancel = st.columns([1, 1])
+
+    with col_run:
+        if pending_signals:
+            st.warning("Pending — engine picks up within 30s.")
+            st.button("Run Smoke Test", disabled=True, key="smoke_run")
+        elif in_flight:
+            st.info(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
+            st.button("Run Smoke Test", disabled=True, key="smoke_run")
+        else:
+            if st.button("Run Smoke Test", key="smoke_run"):
+                run_async(repository.create_control_signal("smoke_test"))
+                st.success("Signal queued.")
+                st.rerun()
+
+    with col_cancel:
+        can_cancel = bool(pending_signals or in_flight)
+        if st.button("Cancel / Abort", disabled=not can_cancel, type="secondary", key="smoke_abort"):
+            run_async(repository.create_control_signal("smoke_test_abort"))
+            st.warning("Abort signal queued. Engine will unwind and close within 30s.")
+            st.rerun()
     if positions:
         st.subheader("Recent runs")
         st.dataframe(
@@ -388,23 +399,34 @@ elif page == "Delta Check":
     )
 
     from engine.db import repository
+    from engine.db.models import PositionState
 
     signals = run_async(repository.get_recent_control_signals("delta_check", limit=5))
-    pending = [s for s in signals if s.consumed_at is None]
-
-    if pending:
-        st.warning(
-            "Delta check pending — the engine will pick it up on its next loop tick (~30s)."
-        )
-        st.button("Run Delta Check", disabled=True)
-    else:
-        if st.button("Run Delta Check"):
-            run_async(repository.create_control_signal("delta_check"))
-            st.success("Signal queued. Engine will pick it up within 30s.")
-            st.rerun()
-
-    # Recent delta check positions
+    pending_signals = [s for s in signals if s.consumed_at is None]
     positions = run_async(repository.get_positions_by_strategy("delta_check", limit=5))
+    in_flight = [p for p in positions if p.state != PositionState.IDLE]
+
+    col_run, col_cancel = st.columns([1, 1])
+
+    with col_run:
+        if pending_signals:
+            st.warning("Pending — engine picks up within 30s.")
+            st.button("Run Delta Check", disabled=True, key="dc_run")
+        elif in_flight:
+            st.info(f"Running — position {in_flight[0].id} in state `{in_flight[0].state}`.")
+            st.button("Run Delta Check", disabled=True, key="dc_run")
+        else:
+            if st.button("Run Delta Check", key="dc_run"):
+                run_async(repository.create_control_signal("delta_check"))
+                st.success("Signal queued. Engine will pick it up within 30s.")
+                st.rerun()
+
+    with col_cancel:
+        can_cancel = bool(pending_signals or in_flight)
+        if st.button("Cancel / Abort", disabled=not can_cancel, type="secondary", key="dc_abort"):
+            run_async(repository.create_control_signal("delta_check_abort"))
+            st.warning("Abort signal queued. Engine will unwind and close within 30s.")
+            st.rerun()
     if positions:
         st.subheader("Recent runs")
 

@@ -106,63 +106,94 @@ class OrderManager:
         self._min_order_size: dict[str, float] = {}
 
     # Hardcoded fallbacks for BitMEX contracts whose minimums ccxt doesn't
-    # reliably populate on testnet. Values are in the contract's native unit
-    # (USD contracts for inverse perps/futures, BTC for quanto/linear).
+    # reliably populate on testnet. Values are native lot sizes (USD contracts
+    # for inverse/quanto, micro-XBT contracts for linear).
     _BITMEX_KNOWN_MINIMUMS: dict[str, float] = {
-        "BTC/USD:BTC": 100.0,   # XBTUSD inverse perp — 100 USD contracts
-        "ETH/USD:ETH": 1.0,     # ETHUSD inverse perp — 1 USD contract
-        "BTC/USDT:USDT": 100.0, # XBTUSDT linear perp — 100 micro-XBT contracts
+        "BTC/USD:BTC":   100.0,  # XBTUSD inverse perp — 100 USD contracts
+        "ETH/USD:BTC":   1.0,    # ETHUSD quanto perp — 1 USD contract
+        "BTC/USDT:USDT": 100.0,  # XBTUSDT linear perp — 100 micro-XBT contracts
     }
 
     # Contract spec fallbacks for when ccxt market data is unavailable (testnet gaps).
-    # contractSize is only relevant for non-inverse contracts:
-    #   Linear perp (XBTUSDT): 1 contract = 0.000001 XBT → contractSize=0.000001
-    #   Spot (BTC/USDT): 1 unit = 1 BTC → contractSize=1.0
-    # For inverse contracts, contractSize is ignored (1 contract = $1 notional always).
+    # Real ccxt values confirmed on BitMEX testnet 2026-04-12:
+    #   BTC/USD:BTC:   inverse=True,  contractSize=100_000_000 (raw satoshi mult, ignored)
+    #   ETH/USD:BTC:   quanto=True,   contractSize=100 (satoshis per $1 per contract)
+    #   BTC/USDT:USDT: linear=True,   contractSize=1e-6 (XBT per contract)
+    #   BTC/USDT:      spot=True,     contractSize=None
     _BITMEX_KNOWN_CONTRACT_SPECS: dict[str, dict] = {
-        "BTC/USD:BTC": {"inverse": True},
-        "ETH/USD:ETH": {"inverse": True},
-        "BTC/USDT:USDT": {"inverse": False, "contractSize": 0.000001},
-        "BTC/USDT":    {"inverse": False, "contractSize": 1.0},
+        "BTC/USD:BTC":   {"inverse": True},
+        "ETH/USD:BTC":   {"quanto": True, "contractSize": 100},
+        "BTC/USDT:USDT": {"linear": True, "contractSize": 0.000001},
+        "BTC/USDT":      {"spot": True},
     }
 
     def _get_min_order_size(self, symbol: str) -> float:
-        """Return the minimum order size for a symbol, queried from ccxt market data.
-        Falls back to hardcoded BitMEX minimums when ccxt returns nothing (common on
-        testnet). Returns 0.0 only if truly unknown (skips the check)."""
+        """Return the minimum lot size for a symbol from ccxt market data.
+
+        BitMEX always returns limits.amount.min=None. For derivatives (symbol
+        contains ':'), precision.amount equals the exchange lot size and is used
+        instead. Spot precision.amount is in satoshi sub-units and must NOT be
+        used — falls back to known minimums or 0.0.
+        """
         if symbol in self._min_order_size:
             return self._min_order_size[symbol]
         try:
-            ccxt = getattr(self._exchange, "_ccxt", None)
-            if ccxt is None:
+            ccxt_obj = getattr(self._exchange, "_ccxt", None)
+            if ccxt_obj is None:
                 return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
-            markets = getattr(ccxt, "markets", None)
+            markets = getattr(ccxt_obj, "markets", None)
             if not isinstance(markets, dict):
                 return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
             market = markets.get(symbol, {})
-            min_amt = (market.get("limits") or {}).get("amount", {}).get("min") or 0
-            result = float(min_amt) or self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
+
+            min_amt = (market.get("limits") or {}).get("amount", {}).get("min")
+            if min_amt is not None:
+                result = float(min_amt)
+            else:
+                # BitMEX returns limits.amount.min=None for all contracts.
+                # For derivatives, precision.amount == lot size (e.g. 100 for XBTUSD).
+                # For spot, precision.amount is in satoshi sub-units — ignore it.
+                is_spot = bool(market.get("spot", False)) or ":" not in symbol
+                if not is_spot:
+                    prec = (market.get("precision") or {}).get("amount")
+                    result = float(prec) if prec is not None else self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
+                else:
+                    result = self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
+
             self._min_order_size[symbol] = result
             return result
         except Exception:
             return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
 
     @staticmethod
-    def _is_ccxt_inverse(symbol: str) -> bool:
+    def _ccxt_contract_type(symbol: str) -> str:
         """
-        Heuristic: a ccxt symbol is inverse when its settlement currency matches
-        the base currency (e.g. BTC/USD:BTC → BTC-settled → inverse).
-        Handles quarterly futures: BTC/USD:BTC-260424 (strip expiry suffix first).
-        Spot symbols have no settlement suffix (BTC/USDT) → not inverse.
+        Classify a ccxt symbol by contract type using symbol pattern alone.
+        Returns 'inverse', 'quanto', 'linear', or 'spot'.
+
+        Pattern logic (strip expiry suffix before matching settlement):
+          no ':' in symbol → spot
+          settlement == base → inverse  (BTC/USD:BTC, BTC/USD:BTC-260424)
+          settlement == quote → linear  (BTC/USDT:USDT)
+          else → quanto                 (ETH/USD:BTC — base=ETH, quote=USD, settle=BTC)
         """
         if ":" not in symbol:
-            return False
+            return "spot"
         base = symbol.split("/")[0]
+        quote = symbol.split("/")[1].split(":")[0]
         settlement = symbol.split(":")[1].split("-")[0]
-        return settlement == base
+        if settlement == base:
+            return "inverse"
+        if settlement == quote:
+            return "linear"
+        return "quanto"
 
     def usd_to_contract_qty(
-        self, symbol: str, usd_notional: float, mark_price: float
+        self,
+        symbol: str,
+        usd_notional: float,
+        mark_price: float,
+        btc_price: float | None = None,
     ) -> float:
         """
         Convert a USD notional to the native contract quantity for any symbol,
@@ -171,15 +202,25 @@ class OrderManager:
         Resolution order for contract metadata:
           1. ccxt market data (loaded at startup, authoritative)
           2. _BITMEX_KNOWN_CONTRACT_SPECS (hardcoded fallback for testnet gaps)
-          3. _is_ccxt_inverse() heuristic (symbol-pattern fallback)
+          3. _ccxt_contract_type() heuristic (symbol-pattern fallback)
 
         Contract semantics:
           Inverse (XBTUSD, quarterly futures):
-            qty = usd_notional / contractSize
-            (contractSize ≈ 1.0 USD; mark_price not involved in sizing)
-          Non-inverse (linear perps, spot):
+            1 contract = $1 USD notional; qty = usd_notional.
+            contractSize from ccxt is raw satoshi multiplier (1e8) — ignored.
+
+          Quanto (ETHUSD):
+            Settled in BTC at a fixed satoshi-per-dollar rate.
+            contractSize from ccxt = satoshi multiplier (e.g. 100 satoshis/$/contract).
+            qty = usd_notional / (mark_price × contractSize × 1e-8 × btc_price)
+            btc_price is required and must be > 0.
+
+          Linear (XBTUSDT):
             qty = usd_notional / (mark_price × contractSize)
-            (contractSize is base currency per contract, e.g. 0.000001 XBT for XBTUSDT)
+            contractSize is in base currency per contract (e.g. 1e-6 XBT).
+
+          Spot (BTC/USDT):
+            qty = usd_notional / mark_price  (base currency units)
         """
         ccxt_obj = getattr(self._exchange, "_ccxt", None)
         market: dict = {}
@@ -189,23 +230,42 @@ class OrderManager:
                 market = markets.get(symbol, {})
 
         known = self._BITMEX_KNOWN_CONTRACT_SPECS.get(symbol, {})
-        is_inverse: bool = bool(
-            market.get("inverse", known.get("inverse", self._is_ccxt_inverse(symbol)))
-        )
+
+        # Resolve contract type: ccxt flags → known specs → symbol heuristic
+        is_inverse = bool(market.get("inverse") or known.get("inverse", False))
+        is_quanto  = bool(market.get("quanto")  or known.get("quanto",  False))
+        is_linear  = bool(market.get("linear")  or known.get("linear",  False))
+        if not any([is_inverse, is_quanto, is_linear]):
+            contract_type = self._ccxt_contract_type(symbol)
+            is_inverse = contract_type == "inverse"
+            is_quanto  = contract_type == "quanto"
+            is_linear  = contract_type == "linear"
+
         contract_size: float = float(
             market.get("contractSize") or known.get("contractSize") or 1.0
         )
         lot_size = self._get_min_order_size(symbol)
 
         if is_inverse:
-            # BitMEX inverse contracts: 1 contract = $1 USD notional.
-            # contractSize from ccxt for inverse instruments is the raw satoshi
-            # multiplier (100_000_000), not 1.0 — ignore it for sizing.
             raw = usd_notional
-        else:
+        elif is_quanto:
+            # quanto contracts settle in BTC; contract value in USD depends on
+            # both the underlying price and the BTC/USD rate.
+            # contractSize from ccxt is in satoshis per $1 per contract.
+            if btc_price is None or btc_price <= 0:
+                raise ValueError(
+                    f"btc_price required and must be > 0 for quanto symbol {symbol!r}"
+                )
+            raw = usd_notional / (mark_price * contract_size * 1e-8 * btc_price)
+        elif is_linear:
             if mark_price <= 0:
-                raise ValueError(f"mark_price must be positive for non-inverse symbol {symbol!r}")
+                raise ValueError(f"mark_price must be positive for linear symbol {symbol!r}")
             raw = usd_notional / (mark_price * contract_size)
+        else:
+            # spot
+            if mark_price <= 0:
+                raise ValueError(f"mark_price must be positive for spot symbol {symbol!r}")
+            raw = usd_notional / mark_price
 
         if lot_size > 0:
             return float(max(lot_size, round(raw / lot_size) * lot_size))

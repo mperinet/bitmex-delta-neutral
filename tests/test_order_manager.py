@@ -528,6 +528,44 @@ class TestUsdToContractQty:
         qty = mgr.usd_to_contract_qty("BTC/USDT", 70_000.0, mark_price=70_000.0)
         assert qty == pytest.approx(1.0)
 
+    def test_quanto_ethusd(self):
+        """Quanto (ETHUSD): qty = notional / (eth_price × contractSize_satoshi × 1e-8 × btc_price)."""
+        mgr = make_mgr_with_markets(
+            # Real ccxt values for ETH/USD:BTC on BitMEX testnet (2026-04-12):
+            # quanto=True, contractSize=100 (100 satoshis per $1 per contract)
+            {"ETH/USD:BTC": {"quanto": True, "contractSize": 100}},
+            min_sizes={"ETH/USD:BTC": 1.0},
+        )
+        # 1000 / (3000 × 100 × 1e-8 × 84000) = 1000 / 0.252 ≈ 3968.25 → 3968 (lot=1)
+        qty = mgr.usd_to_contract_qty(
+            "ETH/USD:BTC", 1_000.0, mark_price=3_000.0, btc_price=84_000.0
+        )
+        expected = round(1_000.0 / (3_000.0 * 100 * 1e-8 * 84_000.0))
+        assert qty == pytest.approx(float(expected))
+
+    def test_quanto_raises_without_btc_price(self):
+        """Quanto contract without btc_price raises ValueError."""
+        mgr = make_mgr_with_markets(
+            {"ETH/USD:BTC": {"quanto": True, "contractSize": 100}},
+            min_sizes={"ETH/USD:BTC": 1.0},
+        )
+        with pytest.raises(ValueError, match="btc_price required"):
+            mgr.usd_to_contract_qty("ETH/USD:BTC", 1_000.0, mark_price=3_000.0)
+
+    def test_fallback_quanto_heuristic(self):
+        """No ccxt data for ETH/USD:BTC → _ccxt_contract_type heuristic → quanto formula."""
+        ex = MagicMock()
+        ex._ccxt = MagicMock()
+        ex._ccxt.markets = {}
+        mgr = OrderManager(exchange=ex, bucket=RateLimitBucket(300))
+        mgr._min_order_size["ETH/USD:BTC"] = 1.0
+        # Falls back to known specs (quanto=True, contractSize=100), then applies formula
+        qty = mgr.usd_to_contract_qty(
+            "ETH/USD:BTC", 1_000.0, mark_price=3_000.0, btc_price=84_000.0
+        )
+        expected = round(1_000.0 / (3_000.0 * 100 * 1e-8 * 84_000.0))
+        assert qty == pytest.approx(float(expected))
+
     def test_fallback_to_known_specs_when_ccxt_empty(self):
         """No ccxt market data: falls back to _BITMEX_KNOWN_CONTRACT_SPECS."""
         ex = MagicMock()
@@ -541,7 +579,7 @@ class TestUsdToContractQty:
     def test_fallback_heuristic_quarterly_future(self):
         """
         Quarterly BTC future (BTC/USD:BTC-260424) not in known specs:
-        _is_ccxt_inverse heuristic correctly identifies it as inverse.
+        _ccxt_contract_type heuristic correctly identifies it as inverse.
         """
         ex = MagicMock()
         ex._ccxt = MagicMock()
@@ -549,7 +587,6 @@ class TestUsdToContractQty:
         mgr = OrderManager(exchange=ex, bucket=RateLimitBucket(300))
         mgr._min_order_size["BTC/USD:BTC-260424"] = 100.0
         qty = mgr.usd_to_contract_qty("BTC/USD:BTC-260424", 10_000.0, mark_price=70_000.0)
-        # Inverse: qty = usd_notional / contractSize(default 1.0) = 10000; round to lot 100
         assert qty == pytest.approx(10_000.0)
 
     def test_lot_size_enforced_as_minimum(self):
@@ -562,21 +599,22 @@ class TestUsdToContractQty:
         assert qty == pytest.approx(100.0)  # min lot
 
 
-class TestIsCcxtInverse:
+class TestCcxtContractType:
     def test_xbtusd_perp(self):
-        assert OrderManager._is_ccxt_inverse("BTC/USD:BTC") is True
+        assert OrderManager._ccxt_contract_type("BTC/USD:BTC") == "inverse"
 
     def test_xbtusd_quarterly_future(self):
-        assert OrderManager._is_ccxt_inverse("BTC/USD:BTC-260424") is True
+        assert OrderManager._ccxt_contract_type("BTC/USD:BTC-260424") == "inverse"
 
-    def test_ethusd_perp(self):
-        assert OrderManager._is_ccxt_inverse("ETH/USD:ETH") is True
+    def test_ethusd_quanto(self):
+        # ETH/USD:BTC — base=ETH, quote=USD, settlement=BTC → quanto
+        assert OrderManager._ccxt_contract_type("ETH/USD:BTC") == "quanto"
 
     def test_xbtusdt_linear_perp(self):
-        assert OrderManager._is_ccxt_inverse("BTC/USDT:USDT") is False
+        assert OrderManager._ccxt_contract_type("BTC/USDT:USDT") == "linear"
 
     def test_spot_no_settlement_suffix(self):
-        assert OrderManager._is_ccxt_inverse("BTC/USDT") is False
+        assert OrderManager._ccxt_contract_type("BTC/USDT") == "spot"
 
     def test_eth_spot(self):
-        assert OrderManager._is_ccxt_inverse("ETH/USDT") is False
+        assert OrderManager._ccxt_contract_type("ETH/USDT") == "spot"

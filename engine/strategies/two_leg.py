@@ -73,6 +73,10 @@ class TwoLegStrategy(Strategy):
         the cache is warm), falling back to a REST ticker call. Delegates contract
         type detection and lot-size rounding to OrderManager.usd_to_contract_qty().
 
+        For quanto contracts (e.g. ETH/USD:BTC) also fetches the BTC/USD price,
+        since quanto contract value in USD depends on both the underlying price and
+        the BTC settlement rate.
+
         Pass mark_price explicitly to reuse a price already fetched in the caller
         and avoid the redundant REST call.
         """
@@ -82,7 +86,17 @@ class TwoLegStrategy(Strategy):
         if mark_price is None:
             ticker = await self._exchange.get_ticker(symbol)
             mark_price = ticker.mark_price
-        return self._order_mgr.usd_to_contract_qty(symbol, usd_notional, mark_price)
+
+        btc_price: float | None = None
+        if self._order_mgr._ccxt_contract_type(symbol) == "quanto":
+            # Quanto contracts settle in BTC; sizing requires the BTC/USD rate.
+            assert self._tracker is not None
+            btc_price = self._tracker.market_data.get_mark_price("XBTUSD")
+            if btc_price is None:
+                ticker = await self._exchange.get_ticker("BTC/USD:BTC")
+                btc_price = ticker.mark_price
+
+        return self._order_mgr.usd_to_contract_qty(symbol, usd_notional, mark_price, btc_price)
 
     async def enter(self) -> int | None:
         spec = await self.compute_entry_spec()

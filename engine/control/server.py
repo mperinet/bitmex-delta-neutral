@@ -11,7 +11,8 @@ Routes:
   POST /control  {"action": "<action>"}  →  queues command, returns 200
   GET  /status                           →  returns {"ok": true}
 
-Valid actions: smoke_test, smoke_test_abort, delta_check, delta_check_abort
+Valid actions: smoke_test, smoke_test_abort, smoke_test_eth, smoke_test_eth_abort,
+               delta_check, delta_check_abort
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ VALID_ACTIONS = frozenset(
     {
         "smoke_test",
         "smoke_test_abort",
+        "smoke_test_eth",
+        "smoke_test_eth_abort",
         "delta_check",
         "delta_check_abort",
     }

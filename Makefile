@@ -1,4 +1,4 @@
-.PHONY: setup install test lint format typecheck backfill engine dashboard smoke-test smoke-abort delta-check delta-abort ctl-status
+.PHONY: setup install test lint format typecheck backfill engine dashboard smoke-test smoke-abort smoke-test-eth smoke-abort-eth delta-check delta-abort ctl-status
 
 # Sync venv from pyproject.toml + uv.lock (run once after clone, or after dep changes)
 install:
@@ -49,6 +49,12 @@ smoke-test:
 
 smoke-abort:
 	PYTHONPATH=. uv run python scripts/ctl.py smoke_test_abort
+
+smoke-test-eth:
+	PYTHONPATH=. uv run python scripts/ctl.py smoke_test_eth
+
+smoke-abort-eth:
+	PYTHONPATH=. uv run python scripts/ctl.py smoke_test_eth_abort
 
 delta-check:
 	PYTHONPATH=. uv run python scripts/ctl.py delta_check

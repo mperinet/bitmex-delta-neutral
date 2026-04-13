@@ -3,8 +3,10 @@
 Engine control CLI — sends commands to the running engine's HTTP server.
 
 Usage:
-  python scripts/ctl.py smoke_test          # run one-shot smoke test
-  python scripts/ctl.py smoke_test_abort    # abort smoke test in progress
+  python scripts/ctl.py smoke_test          # run one-shot BTC smoke test
+  python scripts/ctl.py smoke_test_abort    # abort BTC smoke test in progress
+  python scripts/ctl.py smoke_test_eth      # run one-shot ETH smoke test
+  python scripts/ctl.py smoke_test_eth_abort # abort ETH smoke test in progress
   python scripts/ctl.py delta_check         # run one-shot delta balance check
   python scripts/ctl.py delta_check_abort   # abort delta check in progress
   python scripts/ctl.py status              # check if engine control server is reachable
@@ -33,7 +35,12 @@ def _load_control_cfg() -> tuple[str, int]:
         return "127.0.0.1", 8552
 
 
-VALID_ACTIONS = {"smoke_test", "smoke_test_abort", "delta_check", "delta_check_abort", "status"}
+VALID_ACTIONS = {
+    "smoke_test", "smoke_test_abort",
+    "smoke_test_eth", "smoke_test_eth_abort",
+    "delta_check", "delta_check_abort",
+    "status",
+}
 
 
 def main() -> None:

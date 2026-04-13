@@ -50,6 +50,7 @@ def _dispatch_command(
     cmd: dict,
     smoke_strategy,
     delta_check_strategy,
+    smoke_eth_strategy,
     *,
     exchange,
     order_mgr,
@@ -63,6 +64,7 @@ def _dispatch_command(
     """
     from engine.strategies.delta_check import DeltaCheckStrategy
     from engine.strategies.smoke_test import SmokeTestStrategy
+    from engine.strategies.smoke_test_eth import SmokeTestEthStrategy
 
     action = cmd["action"]
 
@@ -86,6 +88,26 @@ def _dispatch_command(
         else:
             logger.info("smoke_test_abort_noop", reason="no active smoke test")
 
+    elif action == "smoke_test_eth":
+        if smoke_eth_strategy is None or smoke_eth_strategy._done:
+            smoke_eth_strategy = SmokeTestEthStrategy(
+                exchange=exchange,
+                order_manager=order_mgr,
+                position_tracker=tracker,
+                risk_guard=risk_guard,
+                config=strategy_config.get("smoke_test_eth", {}),
+            )
+            logger.info("smoke_test_eth_dispatched")
+        else:
+            logger.warning("smoke_test_eth_already_running")
+
+    elif action == "smoke_test_eth_abort":
+        if smoke_eth_strategy is not None and not smoke_eth_strategy._done:
+            asyncio.create_task(smoke_eth_strategy.force_abort())
+            logger.warning("smoke_test_eth_abort_dispatched")
+        else:
+            logger.info("smoke_test_eth_abort_noop", reason="no active ETH smoke test")
+
     elif action == "delta_check":
         if delta_check_strategy is None or delta_check_strategy._done:
             delta_check_strategy = DeltaCheckStrategy(
@@ -106,7 +128,7 @@ def _dispatch_command(
         else:
             logger.info("delta_check_abort_noop", reason="no active delta check")
 
-    return smoke_strategy, delta_check_strategy
+    return smoke_strategy, delta_check_strategy, smoke_eth_strategy
 
 
 async def run(config: dict) -> None:
@@ -245,6 +267,7 @@ async def run(config: dict) -> None:
     last_snapshot = asyncio.get_event_loop().time()
     smoke_strategy = None
     delta_check_strategy = None
+    smoke_eth_strategy = None
 
     dispatch_kwargs = dict(
         exchange=exchange,
@@ -259,8 +282,11 @@ async def run(config: dict) -> None:
             # -- Drain any commands that arrived while we were running strategies --
             while not control_queue.empty():
                 cmd = control_queue.get_nowait()
-                smoke_strategy, delta_check_strategy = _dispatch_command(
-                    cmd, smoke_strategy, delta_check_strategy, **dispatch_kwargs
+                smoke_strategy, delta_check_strategy, smoke_eth_strategy = (
+                    _dispatch_command(
+                        cmd, smoke_strategy, delta_check_strategy, smoke_eth_strategy,
+                        **dispatch_kwargs,
+                    )
                 )
 
             # -- One-shot strategies --
@@ -269,6 +295,12 @@ async def run(config: dict) -> None:
                     await smoke_strategy.run_once()
                 except Exception as e:
                     logger.error("smoke_test_run_once_error", error=str(e))
+
+            if smoke_eth_strategy is not None and not smoke_eth_strategy._done:
+                try:
+                    await smoke_eth_strategy.run_once()
+                except Exception as e:
+                    logger.error("smoke_test_eth_run_once_error", error=str(e))
 
             if delta_check_strategy is not None and not delta_check_strategy._done:
                 try:
@@ -303,8 +335,11 @@ async def run(config: dict) -> None:
             # -- Wait for next tick OR wake immediately on a new control command --
             try:
                 cmd = await asyncio.wait_for(control_queue.get(), timeout=LOOP_INTERVAL_S)
-                smoke_strategy, delta_check_strategy = _dispatch_command(
-                    cmd, smoke_strategy, delta_check_strategy, **dispatch_kwargs
+                smoke_strategy, delta_check_strategy, smoke_eth_strategy = (
+                    _dispatch_command(
+                        cmd, smoke_strategy, delta_check_strategy, smoke_eth_strategy,
+                        **dispatch_kwargs,
+                    )
                 )
             except TimeoutError:
                 pass  # normal 30s tick

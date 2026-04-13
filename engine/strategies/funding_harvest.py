@@ -48,8 +48,8 @@ class FundingHarvestStrategy(TwoLegStrategy):
         return self._config.get("min_funding_rate", 0.0001)
 
     @property
-    def _max_position_usd(self) -> float:
-        return self._config.get("max_position_usd", 10000.0)
+    def _target_notional_usd(self) -> float:
+        return self._config.get("target_notional_usd", self._config.get("max_position_usd", 10000.0))
 
     async def should_enter(self) -> bool:
         assert self._tracker is not None
@@ -116,23 +116,22 @@ class FundingHarvestStrategy(TwoLegStrategy):
 
     async def compute_entry_spec(self) -> EntrySpec | None:
         perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
-        spot_ticker = await self._exchange.get_ticker(SPOT_SYMBOL)
+
+        usd_notional = self._target_notional_usd
+
+        # Safety guard: skip if the account can't support the configured notional.
         balance = await self._exchange.get_balance()
-
-        # Size: use configured max, but don't exceed available margin
-        # For inverse contracts, notional in USD = qty (contracts)
-        # For spot, qty in BTC = usd_notional / spot_price
-        usd_notional = min(
-            self._max_position_usd,
-            balance.available * perp_ticker.mark_price * 0.40,  # 40% of available
-        )
-
-        if usd_notional < 100:
-            logger.warning("funding_harvest_insufficient_balance", available=balance.available)
+        available_usd = balance.available * perp_ticker.mark_price
+        if available_usd < usd_notional:
+            logger.warning(
+                "funding_harvest_insufficient_balance",
+                available_usd=round(available_usd, 2),
+                target_notional_usd=usd_notional,
+            )
             return None
 
-        perp_qty = usd_notional  # USD contracts (inverse)
-        spot_qty = usd_notional / spot_ticker.ask  # BTC to buy
+        perp_qty = await self._qty_for_usd_notional(PERP_SYMBOL, usd_notional, perp_ticker.mark_price)
+        spot_qty = await self._qty_for_usd_notional(SPOT_SYMBOL, usd_notional)
 
         return EntrySpec(
             leg_a=LegSpec(symbol=PERP_SYMBOL, side="sell", qty=perp_qty),

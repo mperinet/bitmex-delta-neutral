@@ -63,6 +63,27 @@ class TwoLegStrategy(Strategy):
         """
         raise NotImplementedError
 
+    async def _qty_for_usd_notional(
+        self, symbol: str, usd_notional: float, mark_price: float | None = None
+    ) -> float:
+        """
+        Convert a USD notional to the correct native contract quantity for any symbol.
+
+        Resolves mark price from the WS instrument cache first (zero REST calls if
+        the cache is warm), falling back to a REST ticker call. Delegates contract
+        type detection and lot-size rounding to OrderManager.usd_to_contract_qty().
+
+        Pass mark_price explicitly to reuse a price already fetched in the caller
+        and avoid the redundant REST call.
+        """
+        if mark_price is None:
+            assert self._tracker is not None
+            mark_price = self._tracker.market_data.get_mark_price(symbol)
+        if mark_price is None:
+            ticker = await self._exchange.get_ticker(symbol)
+            mark_price = ticker.mark_price
+        return self._order_mgr.usd_to_contract_qty(symbol, usd_notional, mark_price)
+
     async def enter(self) -> int | None:
         spec = await self.compute_entry_spec()
         if spec is None:

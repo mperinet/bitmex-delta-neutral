@@ -449,3 +449,123 @@ async def test_fill_next_slice_skips_when_slice_below_minimum(mock_exchange, buc
 
     assert result is False  # skipped — slice too small
     assert mock_exchange.place_market_order.call_count == 0  # no orders placed
+
+
+# ------------------------------------------------------------------ #
+# OrderManager.usd_to_contract_qty                                    #
+# ------------------------------------------------------------------ #
+
+
+def make_mgr_with_markets(markets: dict, min_sizes: dict | None = None):
+    """Return an OrderManager whose mock exchange exposes the given ccxt markets."""
+    ex = MagicMock()
+    ex._ccxt = MagicMock()
+    ex._ccxt.markets = markets
+    bucket = RateLimitBucket(initial_tokens=300)
+    mgr = OrderManager(exchange=ex, bucket=bucket)
+    if min_sizes:
+        mgr._min_order_size.update(min_sizes)
+    return mgr
+
+
+class TestUsdToContractQty:
+    def test_inverse_perp_no_lot_size(self):
+        """Inverse (XBTUSD): qty = usd_notional; mark_price is irrelevant."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USD:BTC": {"inverse": True, "contractSize": 1.0}},
+            min_sizes={"BTC/USD:BTC": 0.0},
+        )
+        qty = mgr.usd_to_contract_qty("BTC/USD:BTC", 10_000.0, mark_price=70_000.0)
+        assert qty == pytest.approx(10_000.0)
+
+    def test_inverse_perp_lot_rounding(self):
+        """Inverse with lot_size=100: qty rounded to nearest 100."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USD:BTC": {"inverse": True, "contractSize": 1.0}},
+            min_sizes={"BTC/USD:BTC": 100.0},
+        )
+        qty = mgr.usd_to_contract_qty("BTC/USD:BTC", 10_080.0, mark_price=70_000.0)
+        # raw = 10080; round(10080/100)*100 = 101*100 = 10100
+        assert qty == pytest.approx(10_100.0)
+
+    def test_linear_perp_xbtusdt(self):
+        """Linear perp (XBTUSDT): qty = usd_notional / (mark_price × 0.000001), lot=100."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USDT:USDT": {"inverse": False, "contractSize": 0.000001}},
+            min_sizes={"BTC/USDT:USDT": 100.0},
+        )
+        # usd_notional=70, mark=70000 → raw = 70 / (70000 × 0.000001) = 70 / 0.07 = 1000
+        qty = mgr.usd_to_contract_qty("BTC/USDT:USDT", 70.0, mark_price=70_000.0)
+        assert qty == pytest.approx(1_000.0)
+
+    def test_linear_perp_lot_rounding(self):
+        """Linear perp with fractional result rounds to nearest 100-contract lot."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USDT:USDT": {"inverse": False, "contractSize": 0.000001}},
+            min_sizes={"BTC/USDT:USDT": 100.0},
+        )
+        # usd_notional=7.05, mark=70500 → raw = 7.05 / (70500 × 0.000001) = 7.05 / 0.0705 = 100.0
+        qty = mgr.usd_to_contract_qty("BTC/USDT:USDT", 7.05, mark_price=70_500.0)
+        assert qty == pytest.approx(100.0)
+
+    def test_spot_btcusdt(self):
+        """Spot (BTC/USDT): qty = usd_notional / mark_price, contractSize=1.0."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USDT": {"inverse": False, "contractSize": 1.0}},
+            min_sizes={"BTC/USDT": 0.0},
+        )
+        qty = mgr.usd_to_contract_qty("BTC/USDT", 70_000.0, mark_price=70_000.0)
+        assert qty == pytest.approx(1.0)
+
+    def test_fallback_to_known_specs_when_ccxt_empty(self):
+        """No ccxt market data: falls back to _BITMEX_KNOWN_CONTRACT_SPECS."""
+        ex = MagicMock()
+        ex._ccxt = MagicMock()
+        ex._ccxt.markets = {}  # empty — ccxt didn't load
+        mgr = OrderManager(exchange=ex, bucket=RateLimitBucket(300))
+        mgr._min_order_size["BTC/USDT:USDT"] = 100.0
+        qty = mgr.usd_to_contract_qty("BTC/USDT:USDT", 70.0, mark_price=70_000.0)
+        assert qty == pytest.approx(1_000.0)
+
+    def test_fallback_heuristic_quarterly_future(self):
+        """
+        Quarterly BTC future (BTC/USD:BTC-260424) not in known specs:
+        _is_ccxt_inverse heuristic correctly identifies it as inverse.
+        """
+        ex = MagicMock()
+        ex._ccxt = MagicMock()
+        ex._ccxt.markets = {}
+        mgr = OrderManager(exchange=ex, bucket=RateLimitBucket(300))
+        mgr._min_order_size["BTC/USD:BTC-260424"] = 100.0
+        qty = mgr.usd_to_contract_qty("BTC/USD:BTC-260424", 10_000.0, mark_price=70_000.0)
+        # Inverse: qty = usd_notional / contractSize(default 1.0) = 10000; round to lot 100
+        assert qty == pytest.approx(10_000.0)
+
+    def test_lot_size_enforced_as_minimum(self):
+        """Even if raw qty < lot_size, returns lot_size as the minimum."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USD:BTC": {"inverse": True, "contractSize": 1.0}},
+            min_sizes={"BTC/USD:BTC": 100.0},
+        )
+        qty = mgr.usd_to_contract_qty("BTC/USD:BTC", 50.0, mark_price=70_000.0)
+        assert qty == pytest.approx(100.0)  # min lot
+
+
+class TestIsCcxtInverse:
+    def test_xbtusd_perp(self):
+        assert OrderManager._is_ccxt_inverse("BTC/USD:BTC") is True
+
+    def test_xbtusd_quarterly_future(self):
+        assert OrderManager._is_ccxt_inverse("BTC/USD:BTC-260424") is True
+
+    def test_ethusd_perp(self):
+        assert OrderManager._is_ccxt_inverse("ETH/USD:ETH") is True
+
+    def test_xbtusdt_linear_perp(self):
+        assert OrderManager._is_ccxt_inverse("BTC/USDT:USDT") is False
+
+    def test_spot_no_settlement_suffix(self):
+        assert OrderManager._is_ccxt_inverse("BTC/USDT") is False
+
+    def test_eth_spot(self):
+        assert OrderManager._is_ccxt_inverse("ETH/USDT") is False

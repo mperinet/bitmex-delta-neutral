@@ -48,8 +48,9 @@ class CashAndCarryStrategy(TwoLegStrategy):
         return self._config.get("funding_circuit_breaker", 0.50)
 
     @property
-    def _max_position_usd(self) -> float:
-        return self._config.get("max_position_usd", 10000.0)
+    def _target_notional_usd(self) -> float:
+        # Accept both names: new canonical key, with fallback to the old one.
+        return self._config.get("target_notional_usd", self._config.get("max_position_usd", 10000.0))
 
     @property
     def _hours_before_expiry_exit(self) -> int:
@@ -141,18 +142,21 @@ class CashAndCarryStrategy(TwoLegStrategy):
             future_price, spot_price, days_to_expiry
         )
 
-        balance = await self._exchange.get_balance()
-        usd_notional = min(
-            self._max_position_usd,
-            balance.available * spot_price * 0.40,
-        )
+        usd_notional = self._target_notional_usd
 
-        if usd_notional < 100:
-            logger.warning("cash_and_carry_insufficient_balance")
+        # Safety guard: skip if the account can't support the configured notional.
+        balance = await self._exchange.get_balance()
+        available_usd = balance.available * spot_price
+        if available_usd < usd_notional:
+            logger.warning(
+                "cash_and_carry_insufficient_balance",
+                available_usd=round(available_usd, 2),
+                target_notional_usd=usd_notional,
+            )
             return None
 
-        future_qty = usd_notional  # USD contracts (inverse) on the future
-        perp_qty = usd_notional  # USD contracts on the perp
+        future_qty = await self._qty_for_usd_notional(future_symbol, usd_notional, future_price)
+        perp_qty = await self._qty_for_usd_notional(PERP_SYMBOL, usd_notional, spot_price)
 
         return EntrySpec(
             leg_a=LegSpec(symbol=future_symbol, side="sell", qty=future_qty),

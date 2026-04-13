@@ -55,6 +55,7 @@ def _dispatch_command(
     order_mgr,
     tracker,
     risk_guard,
+    strategy_config: dict,
 ):
     """
     Dispatch a control command from the queue. Instantiates one-shot strategies
@@ -72,7 +73,7 @@ def _dispatch_command(
                 order_manager=order_mgr,
                 position_tracker=tracker,
                 risk_guard=risk_guard,
-                config={},
+                config=strategy_config.get("smoke_test", {}),
             )
             logger.info("smoke_test_dispatched")
         else:
@@ -92,7 +93,7 @@ def _dispatch_command(
                 order_manager=order_mgr,
                 position_tracker=tracker,
                 risk_guard=risk_guard,
-                config={},
+                config=strategy_config.get("delta_check", {}),
             )
             logger.info("delta_check_dispatched")
         else:
@@ -250,6 +251,7 @@ async def run(config: dict) -> None:
         order_mgr=order_mgr,
         tracker=tracker,
         risk_guard=risk_guard,
+        strategy_config=config.get("strategy", {}),
     )
 
     try:

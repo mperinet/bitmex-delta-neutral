@@ -114,6 +114,18 @@ class OrderManager:
         "BTC/USDT:USDT": 100.0, # XBTUSDT linear perp — 100 micro-XBT contracts
     }
 
+    # Contract spec fallbacks for the same reason.
+    # contractSize: base-currency units per contract.
+    #   Inverse (XBTUSD): 1 contract = $1 USD notional → contractSize=1.0
+    #   Linear perp (XBTUSDT): 1 contract = 0.000001 XBT → contractSize=0.000001
+    #   Spot (BTC/USDT): 1 unit = 1 BTC → contractSize=1.0
+    _BITMEX_KNOWN_CONTRACT_SPECS: dict[str, dict] = {
+        "BTC/USD:BTC": {"inverse": True,  "contractSize": 1.0},
+        "ETH/USD:ETH": {"inverse": True,  "contractSize": 1.0},
+        "BTC/USDT:USDT": {"inverse": False, "contractSize": 0.000001},
+        "BTC/USDT":    {"inverse": False, "contractSize": 1.0},
+    }
+
     def _get_min_order_size(self, symbol: str) -> float:
         """Return the minimum order size for a symbol, queried from ccxt market data.
         Falls back to hardcoded BitMEX minimums when ccxt returns nothing (common on
@@ -134,6 +146,67 @@ class OrderManager:
             return result
         except Exception:
             return self._BITMEX_KNOWN_MINIMUMS.get(symbol, 0.0)
+
+    @staticmethod
+    def _is_ccxt_inverse(symbol: str) -> bool:
+        """
+        Heuristic: a ccxt symbol is inverse when its settlement currency matches
+        the base currency (e.g. BTC/USD:BTC → BTC-settled → inverse).
+        Handles quarterly futures: BTC/USD:BTC-260424 (strip expiry suffix first).
+        Spot symbols have no settlement suffix (BTC/USDT) → not inverse.
+        """
+        if ":" not in symbol:
+            return False
+        base = symbol.split("/")[0]
+        settlement = symbol.split(":")[1].split("-")[0]
+        return settlement == base
+
+    def usd_to_contract_qty(
+        self, symbol: str, usd_notional: float, mark_price: float
+    ) -> float:
+        """
+        Convert a USD notional to the native contract quantity for any symbol,
+        rounded to the exchange's minimum lot size.
+
+        Resolution order for contract metadata:
+          1. ccxt market data (loaded at startup, authoritative)
+          2. _BITMEX_KNOWN_CONTRACT_SPECS (hardcoded fallback for testnet gaps)
+          3. _is_ccxt_inverse() heuristic (symbol-pattern fallback)
+
+        Contract semantics:
+          Inverse (XBTUSD, quarterly futures):
+            qty = usd_notional / contractSize
+            (contractSize ≈ 1.0 USD; mark_price not involved in sizing)
+          Non-inverse (linear perps, spot):
+            qty = usd_notional / (mark_price × contractSize)
+            (contractSize is base currency per contract, e.g. 0.000001 XBT for XBTUSDT)
+        """
+        ccxt_obj = getattr(self._exchange, "_ccxt", None)
+        market: dict = {}
+        if ccxt_obj is not None:
+            markets = getattr(ccxt_obj, "markets", None)
+            if isinstance(markets, dict):
+                market = markets.get(symbol, {})
+
+        known = self._BITMEX_KNOWN_CONTRACT_SPECS.get(symbol, {})
+        is_inverse: bool = bool(
+            market.get("inverse", known.get("inverse", self._is_ccxt_inverse(symbol)))
+        )
+        contract_size: float = float(
+            market.get("contractSize") or known.get("contractSize") or 1.0
+        )
+        lot_size = self._get_min_order_size(symbol)
+
+        if is_inverse:
+            raw = usd_notional / contract_size
+        else:
+            if mark_price <= 0:
+                raise ValueError(f"mark_price must be positive for non-inverse symbol {symbol!r}")
+            raw = usd_notional / (mark_price * contract_size)
+
+        if lot_size > 0:
+            return float(max(lot_size, round(raw / lot_size) * lot_size))
+        return raw
 
     # ------------------------------------------------------------------
     # Single order placement

@@ -33,7 +33,7 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 logger = structlog.get_logger(__name__)
 
 PERP_SYMBOL = "BTC/USD:BTC"
-MIN_NOTIONAL_USD = 100.0
+PERP_WS_SYMBOL = "XBTUSD"
 
 
 class SmokeTestStrategy(TwoLegStrategy):
@@ -78,29 +78,37 @@ class SmokeTestStrategy(TwoLegStrategy):
         btc_futures.sort(key=lambda f: f["expiry"])
         future_symbol = btc_futures[0]["symbol"]
 
-        perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
-        spot_price = perp_ticker.mark_price
+        usd_notional = self._config.get("target_notional_usd", 1000.0)
 
-        # Same allocation formula as the production strategies (no extra cap)
+        # Safety guard: skip if the account can't support the configured notional.
         balance = await self._exchange.get_balance()
-        usd_notional = balance.available * spot_price * 0.40
-
-        if usd_notional < MIN_NOTIONAL_USD:
+        assert self._tracker is not None
+        mark_price = self._tracker.market_data.get_mark_price(PERP_WS_SYMBOL)
+        if mark_price is None:
+            ticker = await self._exchange.get_ticker(PERP_SYMBOL)
+            mark_price = ticker.mark_price
+        available_usd = balance.available * mark_price
+        if available_usd < usd_notional:
             logger.warning(
                 "smoke_test_insufficient_balance",
-                available_btc=balance.available,
-                usd_notional=usd_notional,
+                available_usd=round(available_usd, 2),
+                target_notional_usd=usd_notional,
             )
             return None
+
+        future_qty = await self._qty_for_usd_notional(future_symbol, usd_notional, mark_price)
+        perp_qty = await self._qty_for_usd_notional(PERP_SYMBOL, usd_notional, mark_price)
 
         logger.info(
             "smoke_test_entry_spec",
             future=future_symbol,
-            notional_usd=usd_notional,
+            target_notional_usd=usd_notional,
+            future_qty=future_qty,
+            perp_qty=perp_qty,
         )
 
         return EntrySpec(
-            leg_a=LegSpec(symbol=future_symbol, side="sell", qty=usd_notional),
-            leg_b=LegSpec(symbol=PERP_SYMBOL, side="buy", qty=usd_notional),
+            leg_a=LegSpec(symbol=future_symbol, side="sell", qty=future_qty),
+            leg_b=LegSpec(symbol=PERP_SYMBOL, side="buy", qty=perp_qty),
             metadata={},
         )

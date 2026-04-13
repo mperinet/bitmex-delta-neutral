@@ -30,16 +30,10 @@ from engine.strategies.two_leg import EntrySpec, LegSpec, TwoLegStrategy
 
 logger = structlog.get_logger(__name__)
 
-PERP_SYMBOL = "BTC/USD:BTC"  # ccxt symbol for order placement
-PERP_WS_SYMBOL = "XBTUSD"  # BitMEX native symbol in _live_positions
+PERP_SYMBOL = "BTC/USD:BTC"       # ccxt symbol for order placement
+PERP_WS_SYMBOL = "XBTUSD"         # BitMEX native symbol in _live_positions
 LINEAR_PERP_SYMBOL = "BTC/USDT:USDT"  # BTCUSDT linear perpetual
-# underlyingToPositionMultiplier from BitMEX contract spec:
-# 1 contract = 0.000001 XBT (micro-XBT), so contracts = XBT_amount × 1_000_000
-LINEAR_UNDERLYING_TO_POSITION_MULT = 1_000_000
-PERP_LOT_SIZE = 100    # XBTUSD minimum order increment in USD contracts
-LINEAR_LOT_SIZE = 100  # XBTUSDT minimum order increment in micro-XBT contracts
-MIN_NOTIONAL_USD = 100.0
-DELTA_BALANCE_THRESHOLD = 0.02  # 2% imbalance triggers a warning in the log
+DELTA_BALANCE_THRESHOLD = 0.02    # 2% imbalance triggers a warning in the log
 
 
 class DeltaCheckStrategy(TwoLegStrategy):
@@ -111,43 +105,31 @@ class DeltaCheckStrategy(TwoLegStrategy):
             logger.error("delta_check_observation_failed", error=str(e))
 
     async def compute_entry_spec(self) -> EntrySpec | None:
-        perp_ticker = await self._exchange.get_ticker(PERP_SYMBOL)
-        linear_ticker = await self._exchange.get_ticker(LINEAR_PERP_SYMBOL)
+        usd_notional = self._config.get("target_notional_usd", 1000.0)
+
+        # Safety guard: skip entry if the account can't support the configured notional.
+        # The notional is set by the operator in config; strategies don't self-size.
         balance = await self._exchange.get_balance()
-
-        # Use the same 40% formula as production strategies (floor at MIN_NOTIONAL_USD)
-        usd_notional = max(
-            MIN_NOTIONAL_USD,
-            balance.available * perp_ticker.mark_price * 0.40,
-        )
-
-        if balance.available * perp_ticker.mark_price < MIN_NOTIONAL_USD:
+        assert self._tracker is not None
+        mark_price = self._tracker.market_data.get_mark_price(PERP_WS_SYMBOL)
+        if mark_price is None:
+            ticker = await self._exchange.get_ticker(PERP_SYMBOL)
+            mark_price = ticker.mark_price
+        available_usd = balance.available * mark_price
+        if available_usd < usd_notional:
             logger.warning(
                 "delta_check_insufficient_balance",
-                available_btc=balance.available,
-                mark_price=perp_ticker.mark_price,
+                available_usd=round(available_usd, 2),
+                target_notional_usd=usd_notional,
             )
             return None
 
-        # XBTUSD qty is in USD contracts (1 contract = $1 notional); must be a
-        # multiple of PERP_LOT_SIZE (100) or the exchange rounds down on fill,
-        # leaving a sub-lot remainder that can never be filled.
-        perp_qty = max(
-            float(PERP_LOT_SIZE),
-            round(usd_notional / PERP_LOT_SIZE) * PERP_LOT_SIZE,
-        )
-        # XBTUSDT qty is in micro-XBT contracts (1 contract = 0.000001 XBT).
-        # Convert: contracts = (usd_notional / ask) × underlyingToPositionMultiplier
-        # then round to the nearest lot (100 contracts).
-        linear_qty_raw = (usd_notional / linear_ticker.ask) * LINEAR_UNDERLYING_TO_POSITION_MULT
-        linear_qty = max(
-            float(LINEAR_LOT_SIZE),
-            round(linear_qty_raw / LINEAR_LOT_SIZE) * LINEAR_LOT_SIZE,
-        )
+        perp_qty = await self._qty_for_usd_notional(PERP_SYMBOL, usd_notional, mark_price)
+        linear_qty = await self._qty_for_usd_notional(LINEAR_PERP_SYMBOL, usd_notional)
 
         logger.info(
             "delta_check_entry_spec",
-            notional_usd=usd_notional,
+            target_notional_usd=usd_notional,
             perp_qty=perp_qty,
             linear_qty=linear_qty,
         )

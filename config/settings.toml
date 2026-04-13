@@ -21,13 +21,19 @@ rate_limit_emergency_reserve = 20            # tokens strategies cannot drain
 enabled = true
 min_basis_annualised = 0.10    # 10% APR minimum to enter
 funding_circuit_breaker = 0.50 # exit when cumulative funding = 50% of locked basis
-max_position_usd = 10000
+target_notional_usd = 10000    # operator-controlled position size in USD
 
 [strategy.funding_harvest]
 enabled = true
 min_funding_rate = 0.0001      # 0.01%/8h minimum to enter (the structural baseline)
 entry_threshold_multiplier = 3 # enter when funding > 3x baseline (0.03%/8h)
-max_position_usd = 10000
+target_notional_usd = 10000    # operator-controlled position size in USD
+
+[strategy.smoke_test]
+target_notional_usd = 1000     # small notional for integration test
+
+[strategy.delta_check]
+target_notional_usd = 1000     # small notional for delta balance verification
 
 [notifications]
 telegram_enabled = false

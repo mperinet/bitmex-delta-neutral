@@ -470,23 +470,34 @@ def make_mgr_with_markets(markets: dict, min_sizes: dict | None = None):
 
 class TestUsdToContractQty:
     def test_inverse_perp_no_lot_size(self):
-        """Inverse (XBTUSD): qty = usd_notional; mark_price is irrelevant."""
+        """Inverse (XBTUSD): qty = usd_notional; mark_price and contractSize irrelevant."""
         mgr = make_mgr_with_markets(
-            {"BTC/USD:BTC": {"inverse": True, "contractSize": 1.0}},
+            # contractSize=100_000_000 simulates ccxt's raw satoshi multiplier on testnet
+            {"BTC/USD:BTC": {"inverse": True, "contractSize": 100_000_000}},
             min_sizes={"BTC/USD:BTC": 0.0},
         )
         qty = mgr.usd_to_contract_qty("BTC/USD:BTC", 10_000.0, mark_price=70_000.0)
+        # Must equal usd_notional, regardless of contractSize or mark_price
         assert qty == pytest.approx(10_000.0)
 
     def test_inverse_perp_lot_rounding(self):
         """Inverse with lot_size=100: qty rounded to nearest 100."""
         mgr = make_mgr_with_markets(
-            {"BTC/USD:BTC": {"inverse": True, "contractSize": 1.0}},
+            {"BTC/USD:BTC": {"inverse": True, "contractSize": 100_000_000}},
             min_sizes={"BTC/USD:BTC": 100.0},
         )
         qty = mgr.usd_to_contract_qty("BTC/USD:BTC", 10_080.0, mark_price=70_000.0)
         # raw = 10080; round(10080/100)*100 = 101*100 = 10100
         assert qty == pytest.approx(10_100.0)
+
+    def test_inverse_quarterly_future(self):
+        """Quarterly future (BTC/USD:BTC-260424): inverse heuristic, contractSize ignored."""
+        mgr = make_mgr_with_markets(
+            {"BTC/USD:BTC-260424": {"inverse": True, "contractSize": 100_000_000}},
+            min_sizes={"BTC/USD:BTC-260424": 100.0},
+        )
+        qty = mgr.usd_to_contract_qty("BTC/USD:BTC-260424", 1_000.0, mark_price=70_000.0)
+        assert qty == pytest.approx(1_000.0)
 
     def test_linear_perp_xbtusdt(self):
         """Linear perp (XBTUSDT): qty = usd_notional / (mark_price × 0.000001), lot=100."""

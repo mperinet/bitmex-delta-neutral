@@ -114,14 +114,14 @@ class OrderManager:
         "BTC/USDT:USDT": 100.0, # XBTUSDT linear perp — 100 micro-XBT contracts
     }
 
-    # Contract spec fallbacks for the same reason.
-    # contractSize: base-currency units per contract.
-    #   Inverse (XBTUSD): 1 contract = $1 USD notional → contractSize=1.0
+    # Contract spec fallbacks for when ccxt market data is unavailable (testnet gaps).
+    # contractSize is only relevant for non-inverse contracts:
     #   Linear perp (XBTUSDT): 1 contract = 0.000001 XBT → contractSize=0.000001
     #   Spot (BTC/USDT): 1 unit = 1 BTC → contractSize=1.0
+    # For inverse contracts, contractSize is ignored (1 contract = $1 notional always).
     _BITMEX_KNOWN_CONTRACT_SPECS: dict[str, dict] = {
-        "BTC/USD:BTC": {"inverse": True,  "contractSize": 1.0},
-        "ETH/USD:ETH": {"inverse": True,  "contractSize": 1.0},
+        "BTC/USD:BTC": {"inverse": True},
+        "ETH/USD:ETH": {"inverse": True},
         "BTC/USDT:USDT": {"inverse": False, "contractSize": 0.000001},
         "BTC/USDT":    {"inverse": False, "contractSize": 1.0},
     }
@@ -198,7 +198,10 @@ class OrderManager:
         lot_size = self._get_min_order_size(symbol)
 
         if is_inverse:
-            raw = usd_notional / contract_size
+            # BitMEX inverse contracts: 1 contract = $1 USD notional.
+            # contractSize from ccxt for inverse instruments is the raw satoshi
+            # multiplier (100_000_000), not 1.0 — ignore it for sizing.
+            raw = usd_notional
         else:
             if mark_price <= 0:
                 raise ValueError(f"mark_price must be positive for non-inverse symbol {symbol!r}")

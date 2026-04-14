@@ -36,7 +36,10 @@ async def upsert_funding_payment(
             fee_currency=fee_currency,
             last_qty=last_qty,
         )
-        .on_conflict_do_nothing(index_elements=["exec_id"])
+        .on_conflict_do_update(
+            index_elements=["exec_id"],
+            set_={"fee_amount": fee_amount, "fee_currency": fee_currency, "last_qty": last_qty},
+        )
     )
     async with get_session() as session:
         result = await session.execute(stmt)

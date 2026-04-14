@@ -57,8 +57,8 @@ async def _sync_funding(client: FundingAnalysisClient) -> dict:
                 exec_id=row["execID"],
                 symbol=row.get("symbol", ""),
                 timestamp=ts,
-                fee_amount=int(row.get("execFee") or 0),
-                fee_currency=row.get("currency", "XBt"),
+                fee_amount=int(row.get("realisedPnl") or 0),
+                fee_currency=row.get("settlCurrency", "XBt"),
                 last_qty=float(row.get("lastQty") or 0),
             )
             if inserted:

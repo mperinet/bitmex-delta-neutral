@@ -64,16 +64,10 @@ def run_async(coro):
 
 
 # ------------------------------------------------------------------ #
-# DB init (once per session)                                           #
+# DB init — runs every script execution; init_db() is idempotent      #
 # ------------------------------------------------------------------ #
 
-
-@st.cache_resource
-def _init_db():
-    run_async(init_db(_DB_URL))
-
-
-_init_db()
+run_async(init_db(_DB_URL))
 
 # ------------------------------------------------------------------ #
 # Page config                                                          #
@@ -283,7 +277,7 @@ with tab_overview:
                         "Net (XBT)": "{:+.6f}",
                     }
                 ),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -299,7 +293,7 @@ with tab_overview:
             fee_breakdown.columns = ["Symbol", "Net Fee (XBT)", "Trades"]
             st.dataframe(
                 fee_breakdown.style.format({"Net Fee (XBT)": "{:+.6f}"}),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -352,7 +346,7 @@ with tab_funding:
                     hovermode="x unified",
                     height=350,
                 )
-                st.plotly_chart(fig_cum, use_container_width=True)
+                st.plotly_chart(fig_cum, width='stretch', key=f"cum_{sym}")
 
                 # Per-settlement bars (green=received, red=paid)
                 colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in sym_df["amount_xbt"]]
@@ -370,14 +364,14 @@ with tab_funding:
                     yaxis_title="XBT",
                     height=300,
                 )
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width='stretch', key=f"bar_{sym}")
 
                 # Raw table for this symbol
                 display_df = sym_df[["timestamp", "amount_xbt", "position_qty"]].copy()
                 display_df.columns = ["Timestamp", "Amount (XBT)", "Position Qty"]
                 st.dataframe(
                     display_df.style.format({"Amount (XBT)": "{:+.8f}"}),
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True,
                 )
 
@@ -412,7 +406,7 @@ with tab_fees:
             hovermode="x unified",
             height=400,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Fee by symbol bar
         st.subheader("Total Fees by Symbol")
@@ -421,7 +415,7 @@ with tab_fees:
             go.Bar(x=fee_by_sym["symbol"], y=fee_by_sym["fee_xbt"], name="Net fee")
         )
         fig2.update_layout(xaxis_title="Symbol", yaxis_title="XBT", height=300)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
         # Buy vs Sell fee split
         if "side" in fees_df.columns and fees_df["side"].notna().any():
@@ -436,7 +430,7 @@ with tab_fees:
                 s = side_df[side_df["side"] == side]
                 fig3.add_trace(go.Bar(x=s["symbol"], y=s["fee_xbt"], name=side))
             fig3.update_layout(barmode="group", xaxis_title="Symbol", yaxis_title="XBT", height=300)
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width='stretch')
 
         # Raw table
         st.subheader("Raw Data")
@@ -444,7 +438,7 @@ with tab_fees:
         display_df.columns = ["Timestamp", "Symbol", "Side", "Qty", "Price", "Fee (XBT)"]
         st.dataframe(
             display_df.style.format({"Fee (XBT)": "{:+.8f}", "Price": "{:,.2f}"}),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
         )
 
@@ -466,7 +460,7 @@ with tab_sync:
             }
             for c in cursors
         ]
-        st.dataframe(pd.DataFrame(cursor_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(cursor_data), width='stretch', hide_index=True)
     else:
         st.info("No sync cursors found — run a sync first.")
 

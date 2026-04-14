@@ -1,4 +1,4 @@
-.PHONY: setup install test lint format typecheck backfill engine dashboard smoke-test smoke-abort smoke-test-eth smoke-abort-eth delta-check delta-abort ctl-status
+.PHONY: setup install test lint format typecheck backfill engine dashboard funding-analysis smoke-test smoke-abort smoke-test-eth smoke-abort-eth delta-check delta-abort ctl-status
 
 # Sync venv from pyproject.toml + uv.lock (run once after clone, or after dep changes)
 install:
@@ -42,6 +42,9 @@ engine: setup
 
 dashboard:
 	uv run streamlit run dashboard/app.py --server.port 8501
+
+funding-analysis:
+	uv run streamlit run funding_analysis/app.py --server.port 8502
 
 # Control CLI — engine must be running (make engine) before using these
 smoke-test:

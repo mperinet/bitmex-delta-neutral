@@ -43,3 +43,7 @@ telegram_chat_id = ""
 [control]
 host = "127.0.0.1"
 port = 8552
+
+[funding_analysis]
+db_url = "sqlite+aiosqlite:///data/funding_analysis.db"
+testnet = false   # set to false to use live capital keys

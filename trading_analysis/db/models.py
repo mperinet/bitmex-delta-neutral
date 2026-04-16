@@ -46,6 +46,7 @@ class FundingPayment(Base):
     fee_amount: Mapped[int] = mapped_column(Integer, nullable=False)  # raw satoshis
     fee_currency: Mapped[str] = mapped_column(String(8), nullable=False, default="XBt")
     last_qty: Mapped[float] = mapped_column(Float, default=0.0)  # position size at settlement
+    funding_rate: Mapped[float | None] = mapped_column(Float, nullable=True)  # lastPx from API (e.g. 0.0001 = 0.01%)
 
     __table_args__ = (
         Index("ix_fp_symbol_ts", "symbol", "timestamp"),
@@ -69,12 +70,42 @@ class ExecutionFee(Base):
     side: Mapped[str | None] = mapped_column(String(8))  # "Buy" | "Sell"
     last_qty: Mapped[float] = mapped_column(Float, default=0.0)
     last_px: Mapped[float] = mapped_column(Float, default=0.0)
-    fee_amount: Mapped[int] = mapped_column(Integer, nullable=False)  # raw satoshis
+    fee_amount: Mapped[int] = mapped_column(Integer, nullable=False)  # raw satoshis (execFee)
     fee_currency: Mapped[str] = mapped_column(String(8), nullable=False, default="XBt")
+    realised_pnl: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # realisedPnl
     timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     __table_args__ = (
         Index("ix_ef_symbol_ts", "symbol", "timestamp"),
+    )
+
+
+class WalletTransaction(Base):
+    """
+    Deposit, withdrawal, conversion, or transfer recorded in /user/walletHistory.
+
+    amount and fee are in the smallest unit of currency:
+      XBt  → satoshis (÷ 1e8 = XBT)
+      USDt → micro-USD (÷ 1e6 = USD)
+    amount positive = received into wallet, negative = left wallet.
+    fee is always positive (cost of withdrawal); 0 for deposits.
+    """
+
+    __tablename__ = "wallet_transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    transact_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    transact_type: Mapped[str] = mapped_column(String(32), nullable=False)  # Deposit / Withdrawal / Conversion / Transfer
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    fee: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    address: Mapped[str | None] = mapped_column(String(128))   # destination / source
+    tx_hash: Mapped[str | None] = mapped_column(String(128))   # on-chain tx
+    transact_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    wallet_balance: Mapped[int | None] = mapped_column(Integer)  # running balance after tx
+
+    __table_args__ = (
+        Index("ix_wt_currency_time", "currency", "transact_time"),
     )
 
 
@@ -112,6 +143,20 @@ async def init_db(url: str) -> None:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in url:
+            from sqlalchemy import text
+            try:
+                await conn.execute(
+                    text("ALTER TABLE execution_fees ADD COLUMN realised_pnl INTEGER NOT NULL DEFAULT 0")
+                )
+            except Exception:
+                pass  # column already exists
+            try:
+                await conn.execute(
+                    text("ALTER TABLE funding_payments ADD COLUMN funding_rate REAL")
+                )
+            except Exception:
+                pass  # column already exists
 
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 

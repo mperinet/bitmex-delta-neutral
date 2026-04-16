@@ -16,6 +16,7 @@ dead_mans_switch_reconnect_timeout_s = 120   # extended during WS reconnect
 liquidation_buffer_pct = 0.10  # reduce position if within 10% of liquidation
 rate_limit_per_5min = 300
 rate_limit_emergency_reserve = 20            # tokens strategies cannot drain
+taker_fee_rate = 0.00075                     # 0.075% BitMEX taker fee (adjust for VIP tiers)
 
 [strategy.cash_and_carry]
 enabled = true
@@ -44,6 +45,6 @@ telegram_chat_id = ""
 host = "127.0.0.1"
 port = 8552
 
-[funding_analysis]
-db_url = "sqlite+aiosqlite:///data/funding_analysis.db"
+[trading_analysis]
+db_url = "sqlite+aiosqlite:///data/trading_analysis.db"
 testnet = false   # set to false to use live capital keys

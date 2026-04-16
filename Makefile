@@ -43,8 +43,8 @@ engine: setup
 dashboard:
 	uv run streamlit run dashboard/app.py --server.port 8501
 
-funding-analysis:
-	uv run streamlit run funding_analysis/app.py --server.port 8502
+trading-analysis:
+	uv run streamlit run trading_analysis/app.py --server.port 8502
 
 # Control CLI — engine must be running (make engine) before using these
 smoke-test:

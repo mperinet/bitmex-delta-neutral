@@ -90,6 +90,35 @@ class FundingAnalysisClient:
         return raw if isinstance(raw, list) else []
 
 
+    async def fetch_wallet_history(
+        self,
+        currency: str,
+        start: int = 0,
+    ) -> list[dict]:
+        """
+        Fetch a page of wallet history for a given currency.
+
+        /user/walletHistory only accepts currency, count, and start — it does
+        NOT support startTime or reverse. Caller is responsible for pagination
+        and stopping when old-enough records have been covered.
+
+        BitMEX records every funding settlement as transactType=RealisedPNL
+        with the correct `amount` in the smallest currency unit (satoshis for
+        XBt, micro-USD for USDt), going back to account genesis.
+        """
+        params = {
+            "currency": currency,
+            "count": _PAGE_SIZE,
+            "start": start,
+        }
+        try:
+            raw = await self._ccxt.private_get_user_wallethistory(params)
+        except Exception as e:
+            logger.error("fetch_wallet_history failed", currency=currency, error=str(e))
+            raise
+        return raw if isinstance(raw, list) else []
+
+
 def _fmt_ts(dt: datetime) -> str:
     """Format a datetime as BitMEX startTime string (ISO 8601 UTC)."""
     if dt.tzinfo is None:

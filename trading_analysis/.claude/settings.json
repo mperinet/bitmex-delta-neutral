@@ -1,0 +1,33 @@
+{
+  "skillOverrides": {
+    "gstack": "off",
+    "gstack-upgrade": "off",
+    "qa": "off",
+    "qa-only": "off",
+    "canary": "off",
+    "benchmark": "off",
+    "design-html": "off",
+    "design-shotgun": "off",
+    "design-review": "off",
+    "design-consultation": "off",
+    "plan-eng-review": "off",
+    "plan-ceo-review": "off",
+    "plan-design-review": "off",
+    "plan-devex-review": "off",
+    "autoplan": "off",
+    "devex-review": "off",
+    "office-hours": "off",
+    "ship": "off",
+    "land-and-deploy": "off",
+    "setup-deploy": "off",
+    "retro": "off",
+    "document-release": "off",
+    "checkpoint": "off",
+    "health": "off",
+    "learn": "off",
+    "investigate": "off",
+    "codex": "off",
+    "review": "off",
+    "security-review": "off"
+  }
+}

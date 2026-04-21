@@ -17,3 +17,5 @@ logs/
 .coverage
 htmlcov/
 # uv.lock should be committed — do NOT add it here
+.gstack/
+.claude/settings.local.json

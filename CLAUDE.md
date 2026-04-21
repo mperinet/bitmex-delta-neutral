@@ -12,12 +12,18 @@ make engine         # Start trading engine
 make dashboard      # Run Streamlit dashboard on port 8501
 make backfill-btc   # Ingest 500 historical BTC funding rate records
 make backfill-eth   # Ingest 500 historical ETH funding rate records
+make lint           # Lint engine/, dashboard/, tests/, scripts/ with ruff
+make format         # Auto-fix + format with ruff
+make typecheck      # Run mypy on engine/
+make trading-analysis  # Run trading analysis dashboard on port 8502
 ```
 
 Control CLI (engine must be running first):
 ```bash
 make smoke-test     # trigger one-shot smoke test
 make smoke-abort    # abort smoke test in progress
+make smoke-test-eth # trigger one-shot ETH smoke test
+make smoke-abort-eth # abort ETH smoke test in progress
 make delta-check    # trigger delta balance check
 make delta-abort    # abort delta check in progress
 make ctl-status     # check if engine control server is reachable
@@ -72,6 +78,7 @@ This is an async, delta-neutral automated trading engine for BitMEX. The engine 
 | Control server | `engine/control/server.py` | aiohttp HTTP server on :8552 — accepts operator commands, logs to DB, wakes main loop via asyncio.Queue |
 | Control CLI | `scripts/ctl.py` | Operator CLI — sends commands to the control server |
 | Dashboard | `dashboard/app.py` | Read-only Streamlit UI, polls DB every 5s |
+| Trading Analysis | `trading_analysis/app.py` | Read-only analytics dashboard on port 8502; fetches account-wide funding payments + execution fees from BitMEX via dedicated readonly API keys; owns its own SQLite DB (`data/trading_analysis.db`) |
 
 ### Strategies
 

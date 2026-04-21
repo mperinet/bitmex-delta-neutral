@@ -144,7 +144,7 @@ async def get_funding_totals() -> dict:
     totals: dict[str, dict] = {}
     for symbol, currency, total in rows:
         key = f"{symbol} ({currency})"
-        divisor = 1e8 if currency == "XBt" else 1e6
+        divisor = 1e8 if currency in ("XBt", "USD") else 1e6
         totals[key] = {
             "symbol": symbol,
             "currency": currency,
@@ -242,7 +242,7 @@ async def get_fee_totals() -> dict:
     totals: dict[str, dict] = {}
     for symbol, currency, total, count in rows:
         key = f"{symbol} ({currency})"
-        divisor = 1e8 if currency == "XBt" else 1e6
+        divisor = 1e8 if currency in ("XBt", "USD") else 1e6
         totals[key] = {
             "symbol": symbol,
             "currency": currency,

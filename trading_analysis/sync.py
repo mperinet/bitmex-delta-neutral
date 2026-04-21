@@ -72,7 +72,7 @@ async def _sync_funding(client: FundingAnalysisClient) -> dict:
                 timestamp=ts,
                 fee_amount=fee_amount,
                 fee_currency=row.get("settlCurrency", "XBt"),
-                last_qty=float(row.get("lastQty") or 0) / 100,
+                last_qty=float(row.get("lastQty") or 0),
                 funding_rate=float(raw_rate) if raw_rate is not None else None,
             )
             if inserted:
@@ -115,10 +115,10 @@ async def _sync_fees(client: FundingAnalysisClient) -> dict:
                 order_id=row.get("orderID"),
                 symbol=row.get("symbol", ""),
                 side=row.get("side"),
-                last_qty=float(row.get("lastQty") or 0) / 100,
+                last_qty=float(row.get("lastQty") or 0),
                 last_px=float(row.get("lastPx") or 0),
                 fee_amount=int(row.get("execComm") or 0),
-                fee_currency=row.get("settlCurrency") or row.get("currency", "XBt"),
+                fee_currency=row.get("settlCurrency") or "XBt",
                 timestamp=ts,
                 realised_pnl=int(row.get("realisedPnl") or 0),
             )

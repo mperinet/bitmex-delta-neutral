@@ -270,9 +270,9 @@ def load_funding_df(since_iso: str | None, until_iso: str | None) -> pd.DataFram
             {
                 "timestamp": r.timestamp,
                 "symbol": r.symbol,
-                "amount_xbt": r.fee_amount / (1e8 if r.fee_currency.lower() == "xbt" else 1e6),
+                "amount_xbt": r.fee_amount / (1e8 if r.fee_currency.lower() in ("xbt", "usd") else 1e6),
                 "currency": r.fee_currency.lower(),
-                "position_qty": r.last_qty if r.fee_currency.lower() == "xbt" else r.last_qty / 100,
+                "position_qty": _display_qty(r.symbol, r.fee_currency, r.timestamp, r.last_qty),
                 "funding_rate": r.funding_rate,
             }
             for r in rows
@@ -282,6 +282,125 @@ def load_funding_df(since_iso: str | None, until_iso: str | None) -> pd.DataFram
     return df.sort_values("timestamp")
 
 
+
+# Per-symbol multipliers for USD quanto (XBT-settled) contracts.
+# Formula: underlying_qty = raw_lastQty × multiplier / 1e8
+# (same formula as USDT linear; derived empirically from fee-rate analysis)
+# Symbols not listed here use the default 0.01 (= 1/100 — equivalent to the old
+# raw/100 display, i.e. DOTUSD/LINKUSD/LUNAUSD/SUIUSD which need no extra scaling).
+_USD_QUANTO_CORRECTIONS: dict[str, float] = {
+    # multiplier = 1e5 (= 0.001 underlying per contract):
+    "ETHUSD": 0.001, "ETHUSDH21": 0.001, "ETHUSDH22": 0.001, "ETHUSDH24": 0.001,
+    "ETHUSDH25": 0.001, "ETHUSDM25": 0.001, "ETHUSDZ24": 0.001,
+    "SOLUSD": 0.001, "AAVEUSD": 0.001, "AXSUSD": 0.001, "BNBUSD": 0.001,
+    # multiplier = 1e7 (= 0.1 underlying per contract):
+    "ADAUSD": 0.1, "GMTUSD": 0.1,
+    # Larger multipliers:
+    "XRPUSD": 0.2,     # multiplier = 2e7; confirmed across 2020-2025
+    "DOGEUSD": 1.0,    # multiplier = 1e8; confirmed 2024-2025 bulk
+}
+_USD_QUANTO_DEFAULT = 0.01  # = multiplier 1e6; covers DOTUSD/LINKUSD/LUNAUSD/SUIUSD etc.
+
+
+def _usd_quanto_qty(symbol: str, db_qty: float) -> float:
+    """Convert raw lastQty to underlying asset quantity for a USD quanto XBT-settled contract."""
+    return db_qty * _USD_QUANTO_CORRECTIONS.get(symbol.upper(), _USD_QUANTO_DEFAULT)
+
+
+def _display_qty(symbol: str, fee_currency: str, timestamp: datetime, db_qty: float) -> float:
+    """Return the correct display quantity for any contract type."""
+    fc = fee_currency.lower()
+    if _usd_symbol_is_inverse(symbol):
+        return db_qty  # XBT inverse (XBTUSD/futures): raw contracts, no correction
+    if fc in ("xbt", "usd"):
+        return _usd_quanto_qty(symbol, db_qty)  # USD quanto: convert contracts → underlying
+    return _usdt_qty(symbol, timestamp, db_qty)  # USDT linear
+
+
+# BitMEX instrument multiplier per USDT symbol (verified empirically from fee rates).
+# Formula: underlying_qty = raw_lastQty × multiplier / 1e8
+# multiplier is in units of 1e-8 underlying per contract (BitMEX instrument field).
+_USDT_MULTIPLIERS: dict[str, int] = {
+    "MATICUSDT": 10_000,
+    "DOGEUSDT":  10_000,
+    "DOTUSDT":    1_000,
+    "SOLUSDT":   10_000,   # current era (post-2026-03-01)
+    "ETHUSDT":       10,
+    "XRPUSDT":   10_000,
+    "ADAUSDT":   10_000,
+    "BNBUSDT":      100,
+    "LTCUSDT":      100,
+    "AVAXUSDT":     100,
+    "BCHUSDT":       10,
+    "SUIUSDT":    1_000,
+}
+
+# Symbols that changed contract size mid-history.
+# Format: {symbol: [(cutoff_utc, multiplier_before_cutoff), ...]}
+# Records with timestamp < cutoff use multiplier_before_cutoff.
+_HISTORICAL_MULTIPLIERS: dict[str, list[tuple[datetime, int]]] = {
+    # SOLUSDT multiplier was 100 until ~2026-03: confirmed by fee-rate analysis of DB data.
+    # Last old-era record: 2026-02-21. First new-era record: 2026-04-16.
+    "SOLUSDT": [(datetime(2026, 3, 1, tzinfo=timezone.utc), 100)],
+}
+
+
+def _usdt_qty(symbol: str, timestamp: datetime, db_qty: float) -> float:
+    """Convert raw lastQty to underlying asset quantity for a USDT linear contract.
+
+    Formula: raw_lastQty × multiplier / 1e8
+    where multiplier is the BitMEX instrument field in units of 1e-8 underlying/contract.
+    """
+    multiplier = _USDT_MULTIPLIERS.get(symbol.upper(), 10_000)
+
+    for cutoff, old_mult in _HISTORICAL_MULTIPLIERS.get(symbol.upper(), []):
+        ts = timestamp if isinstance(timestamp, datetime) else pd.Timestamp(timestamp).to_pydatetime()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < cutoff:
+            multiplier = old_mult
+            break
+
+    return db_qty * multiplier / 1e8
+
+
+def _fmt_price(v: float) -> str:
+    """Format a price value with enough decimal places for micro-priced tokens."""
+    if v == 0:
+        return "0"
+    if v >= 0.01:
+        return f"{v:,.4f}"
+    if v >= 0.000001:
+        return f"{v:.8f}"
+    return f"{v:.10f}"
+
+
+def _usd_symbol_is_inverse(symbol: str) -> bool:
+    """Return True only for XBTUSD and its dated futures (e.g. XBTH18, XBTZ18).
+
+    All other USD-labelled contracts (ETHUSD, LINKUSD, DOGEUSD, SOLUSD …) are
+    USD quanto perpetuals whose execComm/realisedPnl are stored as satoshis
+    (divide by 1e8 to get XBT, same as inverse).
+    """
+    return symbol.upper().startswith("XBT")
+
+
+def _fee_divisor_and_currency(symbol: str, fee_currency: str) -> tuple[float, str]:
+    """Return (divisor, display_currency) for a symbol's raw fee/pnl integers.
+
+    XBT*   → satoshis ÷ 1e8 → XBT  (inverse, fee_currency="XBt")
+    *USD quanto → satoshis ÷ 1e8 → XBT  (fee_currency="USD" legacy or "XBt" after sync fix)
+    *USDT  → micro-USDT ÷ 1e6 → USDT
+    """
+    fc = fee_currency.lower()
+    if fc == "xbt":
+        return 1e8, "xbt"
+    if fc == "usd":
+        return 1e8, "xbt"  # inverse and quanto both store satoshis; display in XBT
+    # usdt / usdт
+    return 1e6, "usdt"
+
+
 @st.cache_data(ttl=60)
 def load_fees_df(since_iso: str | None, until_iso: str | None) -> pd.DataFrame:
     since_dt = datetime.fromisoformat(since_iso) if since_iso else None
@@ -289,22 +408,23 @@ def load_fees_df(since_iso: str | None, until_iso: str | None) -> pd.DataFrame:
     rows = run_async(repository.get_execution_fees(since=since_dt, until=until_dt))
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(
-        [
-            {
-                "timestamp": r.timestamp,
-                "symbol": r.symbol,
-                "side": r.side,
-                "qty": r.last_qty if r.fee_currency.lower() in ("xbt", "usd") else r.last_qty / 100,
-                "price": r.last_px,
-                "fee_xbt": -r.fee_amount / (1e8 if r.fee_currency.lower() in ("xbt", "usd") else 1e6),
-                "realised_pnl": r.realised_pnl / (1e8 if r.fee_currency.lower() in ("xbt", "usd") else 1e6),
-                "net_position_pnl": (r.realised_pnl + r.fee_amount) / (1e8 if r.fee_currency.lower() in ("xbt", "usd") else 1e6),
-                "currency": "xbt" if r.fee_currency.lower() in ("xbt", "usd") else r.fee_currency.lower(),
-            }
-            for r in rows
-        ]
-    )
+    def _row_dict(r):
+        div, ccy = _fee_divisor_and_currency(r.symbol, r.fee_currency)
+        return {
+            "exec_id": r.exec_id,
+            "timestamp": r.timestamp,
+            "symbol": r.symbol,
+            "side": r.side,
+            "qty": _display_qty(r.symbol, r.fee_currency, r.timestamp, r.last_qty),
+            "price": r.last_px,
+            "fee_xbt": -r.fee_amount / div,
+            "realised_pnl": r.realised_pnl / div,
+            "net_position_pnl": (r.realised_pnl + r.fee_amount) / div,
+            "currency": ccy,
+            "fee_currency": r.fee_currency.lower(),
+        }
+
+    df = pd.DataFrame([_row_dict(r) for r in rows])
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.sort_values("timestamp")
 
@@ -468,6 +588,235 @@ with tab_funding:
             funding_df["symbol"].unique(),
             key=lambda s: (_CCY_ORDER.get(_sym_ccy.get(s, ""), 2), s),
         )
+
+        # ── Shared helpers ─────────────────────────────────────────────
+        _now = pd.Timestamp.now(tz="UTC")
+        _30d_ago = _now - pd.Timedelta(days=30)
+        _1y_ago = _now - pd.Timedelta(days=365)
+        _overview_df = funding_df[funding_df["timestamp"] >= _30d_ago].copy()
+        _1y_df = funding_df[funding_df["timestamp"] >= _1y_ago].copy()
+
+        _xbt_syms = [s for s in symbols_in_data if _sym_ccy.get(s) == "xbt"]
+        _usdt_syms = [s for s in symbols_in_data if _sym_ccy.get(s) == "usdt"]
+
+        _PALETTE = [
+            "#4e79a7", "#f28e2b", "#e15759", "#76b7b2",
+            "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+        ]
+
+        def _build_overview_fig(
+            syms: list[str], df: pd.DataFrame, ccy_label: str,
+            x_start: pd.Timestamp = None, x_end: pd.Timestamp = None,
+        ) -> go.Figure:
+            fig = go.Figure()
+            for i, sym in enumerate(syms):
+                color = _PALETTE[i % len(_PALETTE)]
+                sdf = df[df["symbol"] == sym].sort_values("timestamp")
+                if sdf.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=sdf["timestamp"],
+                    y=sdf["amount_xbt"],
+                    mode="lines+markers",
+                    marker=dict(size=3),
+                    name=sym,
+                    line=dict(color=color),
+                    legendgroup=sym,
+                    yaxis="y1",
+                ))
+                rate_sdf = sdf[sdf["funding_rate"].notna()].set_index("timestamp")["funding_rate"]
+                sdf["rate_pct"] = sdf["timestamp"].map(rate_sdf).apply(
+                    lambda v: f"{v * 100:.4f}%" if pd.notna(v) else "n/a"
+                )
+                fig.data[-1].update(
+                    customdata=sdf["rate_pct"].values,
+                    hovertemplate=(
+                        f"<b>{sym}</b><br>"
+                        "Amount: %{y:.6f}<br>"
+                        "Rate: %{customdata}<extra></extra>"
+                    ),
+                )
+            x_range = [x_start, x_end] if x_start and x_end else None
+            fig.update_layout(
+                xaxis=dict(title="Date", **({"range": x_range} if x_range else {})),
+                yaxis=dict(title=f"Amount ({ccy_label})", tickformat=".6f"),
+                hovermode="x unified",
+                height=360,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(t=40, b=40),
+            )
+            return fig
+
+        def _build_daily_agg_fig(
+            syms: list[str], df: pd.DataFrame, ccy_label: str,
+            x_start: pd.Timestamp, x_end: pd.Timestamp,
+            btc_usd: float = 0.0,
+        ) -> go.Figure:
+            sdf = df[df["symbol"].isin(syms)].copy()
+            if sdf.empty:
+                return go.Figure()
+            sdf["date"] = sdf["timestamp"].dt.normalize()
+            daily = sdf.groupby("date")["amount_xbt"].sum().reset_index()
+            daily["cumulative"] = daily["amount_xbt"].cumsum()
+            daily["color"] = daily["amount_xbt"].apply(lambda v: "#2ecc71" if v >= 0 else "#e74c3c")
+            daily["group"] = (daily["color"] != daily["color"].shift()).cumsum()
+            daily = daily.reset_index(drop=True)
+            fig = go.Figure()
+            for _, grp in daily.groupby("group", sort=True):
+                color = grp["color"].iloc[0]
+                first_idx = grp.index[0]
+                if first_idx > 0:
+                    prev = daily.loc[first_idx - 1]
+                    xs = [prev["date"]] + list(grp["date"])
+                    ys = [prev["cumulative"]] + list(grp["cumulative"])
+                else:
+                    xs = list(grp["date"])
+                    ys = list(grp["cumulative"])
+                if ccy_label == "XBT" and btc_usd:
+                    usd_vals = [v * btc_usd for v in ys]
+                    hover = "Cumulative: %{y:.6f} XBT<br>≈ %{customdata:,.2f}$<extra></extra>"
+                else:
+                    usd_vals = None
+                    hover = "Cumulative: %{y:.6f}<extra></extra>"
+                fig.add_trace(go.Scatter(
+                    x=xs, y=ys,
+                    mode="lines",
+                    line=dict(color=color, width=2),
+                    showlegend=False,
+                    customdata=usd_vals,
+                    hovertemplate=hover,
+                ))
+            fig.update_layout(
+                xaxis=dict(title="Date", range=[x_start, x_end], hoverformat=" "),
+                yaxis=dict(title=f"Cumulative ({ccy_label})", tickformat=".6f"),
+                hovermode="x unified",
+                height=360,
+                margin=dict(t=40, b=40),
+            )
+            return fig
+
+        # ── 1-year overview charts ─────────────────────────────────────
+        if not _1y_df.empty:
+            _1y_col_xbt, _1y_col_usdt = st.columns(2)
+            with _1y_col_xbt:
+                st.subheader("XBT-settled — last year")
+                if _xbt_syms:
+                    _1y_xbt_syms = [s for s in _xbt_syms if s in _1y_df["symbol"].values]
+                    st.plotly_chart(
+                        _build_daily_agg_fig(_1y_xbt_syms, _1y_df, "XBT", _1y_ago, _now, _btc_usd_price),
+                        width="stretch", key="overview_1y_xbt",
+                    )
+                else:
+                    st.caption("No XBT-settled symbols in data.")
+            with _1y_col_usdt:
+                st.subheader("USDT-settled — last year")
+                if _usdt_syms:
+                    _1y_usdt_syms = [s for s in _usdt_syms if s in _1y_df["symbol"].values]
+                    st.plotly_chart(
+                        _build_daily_agg_fig(_1y_usdt_syms, _1y_df, "USDT", _1y_ago, _now),
+                        use_container_width=True, key="overview_1y_usdt",
+                    )
+                else:
+                    st.caption("No USDT-settled symbols in data.")
+
+        # ── 30-day overview charts ─────────────────────────────────────
+        if _overview_df.empty:
+            st.info("No funding data in the last 30 days for the overview charts.")
+        else:
+            _ov_col_xbt, _ov_col_usdt = st.columns(2)
+            with _ov_col_xbt:
+                st.subheader("XBT-settled — last 30 days")
+                if _xbt_syms:
+                    _fig_xbt = _build_overview_fig(
+                        [s for s in _xbt_syms if s in _overview_df["symbol"].values],
+                        _overview_df, "XBT", _30d_ago, _now,
+                    )
+                    st.plotly_chart(_fig_xbt, use_container_width=True, key="overview_xbt")
+                else:
+                    st.caption("No XBT-settled symbols in data.")
+            with _ov_col_usdt:
+                st.subheader("USDT-settled — last 30 days")
+                if _usdt_syms:
+                    _fig_usdt = _build_overview_fig(
+                        [s for s in _usdt_syms if s in _overview_df["symbol"].values],
+                        _overview_df,
+                        "USDT",
+                    )
+                    st.plotly_chart(_fig_usdt, use_container_width=True, key="overview_usdt")
+                else:
+                    st.caption("No USDT-settled symbols in data.")
+
+        # ── Daily aggregate bar charts ─────────────────────────────────
+        if not _overview_df.empty:
+            _daily_col_xbt, _daily_col_usdt = st.columns(2)
+
+            def _build_daily_bar(syms: list[str], df: pd.DataFrame, ccy_label: str, btc_usd: float = 0.0) -> go.Figure:
+                sdf = df[df["symbol"].isin(syms)].copy()
+                if sdf.empty:
+                    return go.Figure()
+                sdf["date"] = sdf["timestamp"].dt.normalize()
+                daily = sdf.groupby("date")["amount_xbt"].sum().reset_index()
+                colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in daily["amount_xbt"]]
+                if ccy_label == "XBT" and btc_usd:
+                    usd_labels = (daily["amount_xbt"] * btc_usd).apply(lambda v: f"{v:,.2f}$")
+                    hovertemplate = "Date: %{x|%Y-%m-%d}<br>Total: %{y:.6f} XBT<br>≈ %{customdata}<extra></extra>"
+                else:
+                    usd_labels = daily["amount_xbt"].apply(lambda v: f"{v:,.2f}$")
+                    hovertemplate = "Date: %{x|%Y-%m-%d}<br>Total: %{y:.6f}<extra></extra>"
+                fig = go.Figure(go.Bar(
+                    x=daily["date"],
+                    y=daily["amount_xbt"],
+                    marker_color=colors,
+                    customdata=usd_labels,
+                    hovertemplate=hovertemplate,
+                    text=usd_labels,
+                    textposition="inside",
+                    textfont=dict(size=10),
+                ))
+                fig.update_layout(
+                    xaxis=dict(title="Date", range=[_30d_ago, _now]),
+                    yaxis=dict(title=f"Amount ({ccy_label})", tickformat=".6f"),
+                    height=300,
+                    margin=dict(t=20, b=40),
+                )
+                return fig
+
+            with _daily_col_xbt:
+                if _xbt_syms:
+                    _xbt_syms_present = [s for s in _xbt_syms if s in _overview_df["symbol"].values]
+                    _xbt_total = _overview_df[_overview_df["symbol"].isin(_xbt_syms_present)]["amount_xbt"].sum()
+                    _xbt_usd_total = _xbt_total * _btc_usd_price if _btc_usd_price else None
+                    _xbt_usd_str = f"≈ {_xbt_usd_total:,.2f}$" if _xbt_usd_total is not None else ""
+                    st.subheader(
+                        "XBT-settled daily total",
+                        anchor=False,
+                    )
+                    st.markdown(
+                        f"<span style='font-size:0.8em; color:gray;'>{_xbt_total:+.6f} XBT{_xbt_usd_str} — (last 30 days)</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(_build_daily_bar(_xbt_syms_present, _overview_df, "XBT", _btc_usd_price), use_container_width=True, key="daily_xbt")
+                else:
+                    st.subheader("XBT-settled daily total")
+                    st.caption("No XBT-settled symbols in data.")
+            with _daily_col_usdt:
+                if _usdt_syms:
+                    _usdt_syms_present = [s for s in _usdt_syms if s in _overview_df["symbol"].values]
+                    _usdt_total = _overview_df[_overview_df["symbol"].isin(_usdt_syms_present)]["amount_xbt"].sum()
+                    st.subheader(
+                        "USDT-settled daily total",
+                        anchor=False,
+                    )
+                    st.markdown(
+                        f"<span style='font-size:0.8em; color:gray;'>{_usdt_total:+,.2f} USDT — (last 30 days)</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(_build_daily_bar(_usdt_syms_present, _overview_df, "USDT"), use_container_width=True, key="daily_usdt")
+                else:
+                    st.subheader("USDT-settled daily total")
+                    st.caption("No USDT-settled symbols in data.")
+
+        st.divider()
 
         # One sub-tab per symbol
         sym_tabs = st.tabs(symbols_in_data)
@@ -649,10 +998,57 @@ with tab_fees:
         display_df = fees_df[["timestamp", "symbol", "side", "qty", "price", "fee_xbt"]].copy()
         display_df.columns = ["Timestamp", "Symbol", "Side", "Qty", "Price", "Fee (XBT)"]
         st.dataframe(
-            display_df.style.format({"Fee (XBT)": "{:+.8f}", "Price": "{:,.2f}"}),
+            display_df.style.format({"Fee (XBT)": "{:+.8f}", "Price": _fmt_price}),
             width='stretch',
             hide_index=True,
         )
+
+def _compute_fifo_pnl_series(df: pd.DataFrame, is_inverse: bool = False) -> "pd.Series":
+    """Average-cost FIFO PNL for one symbol's fills.
+
+    Returns a Series indexed like df where each value is the realised PNL
+    of that fill: positive for a profitable close, 0 for an opening fill.
+
+    is_inverse: True only for XBTUSD and XBT futures.
+      Uses PNL = close_qty × (1/avg_cost − 1/price) instead of the linear formula.
+      All other USD contracts (ETHUSD, LINKUSD, DOGEUSD …) are quanto — pass False.
+    """
+    df = df.sort_values(["timestamp", "exec_id"])
+    position = 0.0
+    avg_cost = 0.0
+    pnls: list[float] = []
+    for _, row in df.iterrows():
+        qty = float(row["qty"])
+        price = float(row["price"])
+        signed = qty if str(row["side"]).lower() == "buy" else -qty
+        pnl = 0.0
+        if position == 0.0:
+            position = signed
+            avg_cost = price
+        elif (position > 0) == (signed > 0):
+            new_pos = position + signed
+            avg_cost = (abs(position) * avg_cost + qty * price) / abs(new_pos)
+            position = new_pos
+        else:
+            close_qty = min(qty, abs(position))
+            if is_inverse:
+                pnl = close_qty * (1/avg_cost - 1/price) if position > 0 else close_qty * (1/price - 1/avg_cost)
+            else:
+                pnl = close_qty * (price - avg_cost) if position > 0 else close_qty * (avg_cost - price)
+            new_pos = position + signed
+            if abs(new_pos) < 1e-9:
+                position = 0.0
+                avg_cost = 0.0
+            elif (new_pos > 0) != (position > 0):
+                # True reversal: position changed sign → new avg_cost at fill price
+                position = new_pos
+                avg_cost = price
+            else:
+                # Partial close: same sign remains → avg_cost unchanged
+                position = new_pos
+        pnls.append(pnl)
+    return pd.Series(pnls, index=df.index)
+
 
 # ================================================================== #
 # TAB 4: PNL                                                           #
@@ -667,12 +1063,33 @@ with tab_pnl:
         _ccy_label_pnl = lambda c: {"xbt": "XBT", "usdt": "USDT"}.get(c, c.upper())
         _CCY_ORDER_PNL = {"xbt": 0, "usdt": 1}
 
-        # Position closes: net_position_pnl = realisedPnl + execComm (adds back the fee to get
-        # gross position gain). For opening/non-closing trades realisedPnl = -execComm, so
-        # net_position_pnl = 0. Only genuine closes have net_position_pnl != 0.
-        _fees_with_pnl = fees_df[fees_df["net_position_pnl"] != 0].copy() if not fees_df.empty else pd.DataFrame()
+        # Augment fees_df: for any fill where BitMEX realisedPnl is 0 (pre-Nov 2024),
+        # compute PNL using average-cost FIFO. FIFO runs over ALL fills per symbol (to
+        # maintain correct position state across the pre/post-Nov 2024 boundary) but is
+        # only written back to rows that have realised_pnl == 0. Post-Nov 2024 rows keep
+        # BitMEX's net_position_pnl unchanged.
+        _fees_aug = fees_df.copy() if not fees_df.empty else pd.DataFrame()
+        if not _fees_aug.empty:
+            _syms_with_zero = set(
+                _fees_aug.loc[_fees_aug["realised_pnl"] == 0, "symbol"].unique()
+            )
+            for _zsym in _syms_with_zero:
+                _sym_mask = _fees_aug["symbol"] == _zsym
+                _sym_rows = _fees_aug[_sym_mask]
+                _fc = _sym_rows["fee_currency"].iloc[0]
+                _is_inverse = _usd_symbol_is_inverse(_zsym)
+                # USD quanto: FIFO returns qty_underlying × Δprice_usd; scale by 1e-3 → XBT
+                # (contractSize / qty_correction ≈ 1e5 sat/$1 per underlying unit → × 1e5/1e8 = × 1e-3)
+                _is_quanto = not _is_inverse and _fc in ("xbt", "usd")
+                _fifo = _compute_fifo_pnl_series(_sym_rows, is_inverse=_is_inverse)
+                if _is_quanto:
+                    _fifo = _fifo * 1e-3
+                _zero_rows = _sym_mask & (_fees_aug["realised_pnl"] == 0)
+                _fees_aug.loc[_zero_rows, "net_position_pnl"] = _fifo[_fees_aug.index[_zero_rows]]
 
-        # Only show symbols that have at least one trade with nonzero realised_pnl
+        _fees_with_pnl = _fees_aug[_fees_aug["net_position_pnl"] != 0].copy() if not _fees_aug.empty else pd.DataFrame()
+
+        # Only show symbols that have at least one trade with nonzero PNL
         _all_pnl_syms = sorted(
             set(_fees_with_pnl["symbol"].unique()) if not _fees_with_pnl.empty else set()
         )
@@ -684,8 +1101,8 @@ with tab_pnl:
             )
         else:
             st.caption(
-                "Trading PnL reflects executed position closes from ~Nov 2024 onwards. "
-                "Earlier records are unavailable from the BitMEX API."
+                "From ~Nov 2024 onwards BitMEX provides `realisedPnl` directly. "
+                "For earlier records, PnL is estimated using the average-cost method from raw fill prices."
             )
 
             # Currency map: prefer fees_df (execution currency), fall back to funding
@@ -705,108 +1122,166 @@ with tab_pnl:
 
             _xrange = [since, until] if since and until else None
 
-            sym_pnl_tabs = st.tabs(_all_pnl_syms_sorted)
+            sym = st.selectbox("Symbol", _all_pnl_syms_sorted, key="pnl_sym_select")
 
-            for sym, sym_tab in zip(_all_pnl_syms_sorted, sym_pnl_tabs):
-                with sym_tab:
-                    ccy = _pnl_sym_ccy.get(sym, "xbt")
-                    label = _ccy_label_pnl(ccy)
+            if sym:
+                ccy = _pnl_sym_ccy.get(sym, "xbt")
+                label = _ccy_label_pnl(ccy)
 
-                    sym_trade = _fees_with_pnl[_fees_with_pnl["symbol"] == sym].copy()
-                    sym_fund  = funding_df[(funding_df["symbol"] == sym) & (funding_df["amount_xbt"] != 0)].copy() if not funding_df.empty else pd.DataFrame()
-                    sym_fee   = fees_df[fees_df["symbol"] == sym].copy() if not fees_df.empty else pd.DataFrame()
+                sym_trade = _fees_with_pnl[_fees_with_pnl["symbol"] == sym].copy()
+                sym_fund  = funding_df[(funding_df["symbol"] == sym) & (funding_df["amount_xbt"] != 0)].copy() if not funding_df.empty else pd.DataFrame()
+                sym_fee   = fees_df[fees_df["symbol"] == sym].copy() if not fees_df.empty else pd.DataFrame()
 
-                    # net_position_pnl = gross gain from closes; fee_xbt = all fees (negative)
-                    trade_pnl_val = sym_trade["net_position_pnl"].sum() if not sym_trade.empty else 0.0
-                    net_fund_val  = sym_fund["amount_xbt"].sum()        if not sym_fund.empty  else 0.0
-                    net_fees_val  = sym_fee["fee_xbt"].sum()            if not sym_fee.empty   else 0.0
-                    total_val     = trade_pnl_val + net_fund_val + net_fees_val
+                # net_position_pnl = gross gain from closes; fee_xbt = all fees (negative)
+                trade_pnl_val = sym_trade["net_position_pnl"].sum() if not sym_trade.empty else 0.0
+                net_fund_val  = sym_fund["amount_xbt"].sum()        if not sym_fund.empty  else 0.0
+                net_fees_val  = sym_fee["fee_xbt"].sum()            if not sym_fee.empty   else 0.0
+                total_val     = trade_pnl_val + net_fund_val + net_fees_val
 
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric(f"Trading PNL ({label})", f"{trade_pnl_val:+.6f}")
-                    c2.metric(f"Net Funding ({label})", f"{net_fund_val:+.6f}")
-                    c3.metric(f"Exec Fees ({label})",   f"{net_fees_val:+.6f}")
-                    c4.metric(f"Total PNL ({label})",   f"{total_val:+.6f}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric(f"Trading PNL ({label})", f"{trade_pnl_val:+.6f}")
+                c2.metric(f"Net Funding ({label})", f"{net_fund_val:+.6f}")
+                c3.metric(f"Exec Fees ({label})",   f"{net_fees_val:+.6f}")
+                c4.metric(f"Total PNL ({label})",   f"{total_val:+.6f}")
 
-                    # ── Cumulative PnL chart — one trace per component ─────
-                    fig_sym = go.Figure()
+                # ── Cumulative PnL chart — one trace per component ─────
+                fig_sym = go.Figure()
 
-                    _td = sym_trade.sort_values("timestamp")
-                    _td = _td.assign(cumulative=_td["net_position_pnl"].cumsum())
+                _td = sym_trade.sort_values("timestamp")
+                _td = _td.assign(cumulative=_td["net_position_pnl"].cumsum())
+                fig_sym.add_trace(go.Scatter(
+                    x=_td["timestamp"], y=_td["cumulative"],
+                    mode="lines", name="Trading PNL",
+                    line=dict(color="#2ecc71"),
+                ))
+
+                if not sym_fund.empty:
+                    _fd = sym_fund.sort_values("timestamp")
+                    _fd = _fd.assign(cumulative=_fd["amount_xbt"].cumsum())
                     fig_sym.add_trace(go.Scatter(
-                        x=_td["timestamp"], y=_td["cumulative"],
-                        mode="lines", name="Trading PNL",
-                        line=dict(color="#2ecc71"),
+                        x=_fd["timestamp"], y=_fd["cumulative"],
+                        mode="lines", name="Funding",
+                        line=dict(color="royalblue", dash="solid"),
                     ))
 
-                    if not sym_fund.empty:
-                        _fd = sym_fund.sort_values("timestamp")
-                        _fd = _fd.assign(cumulative=_fd["amount_xbt"].cumsum())
-                        fig_sym.add_trace(go.Scatter(
-                            x=_fd["timestamp"], y=_fd["cumulative"],
-                            mode="lines", name="Funding",
-                            line=dict(color="royalblue", dash="solid"),
-                        ))
-
-                    if not sym_fee.empty:
-                        _ed = sym_fee.sort_values("timestamp")
-                        _ed = _ed.assign(cumulative=_ed["fee_xbt"].cumsum())
-                        fig_sym.add_trace(go.Scatter(
-                            x=_ed["timestamp"], y=_ed["cumulative"],
-                            mode="lines", name="Exec Fees",
-                            line=dict(color="#e67e22", dash="dot"),
-                        ))
-
-                    # Total: gross position gains + funding + fees (no double-count)
-                    _all_events = [sym_trade[["timestamp", "net_position_pnl"]].rename(columns={"net_position_pnl": "delta"})]
-                    if not sym_fund.empty:
-                        _all_events.append(sym_fund[["timestamp", "amount_xbt"]].rename(columns={"amount_xbt": "delta"}))
-                    if not sym_fee.empty:
-                        _all_events.append(sym_fee[["timestamp", "fee_xbt"]].rename(columns={"fee_xbt": "delta"}))
-                    _tot_d = pd.concat(_all_events, ignore_index=True).sort_values("timestamp")
-                    _tot_d = _tot_d.assign(cumulative=_tot_d["delta"].cumsum())
+                if not sym_fee.empty:
+                    _ed = sym_fee.sort_values("timestamp")
+                    _ed = _ed.assign(cumulative=_ed["fee_xbt"].cumsum())
                     fig_sym.add_trace(go.Scatter(
-                        x=_tot_d["timestamp"], y=_tot_d["cumulative"],
-                        mode="lines", name="Total",
-                        line=dict(color="#aaaaaa", width=1.5),
+                        x=_ed["timestamp"], y=_ed["cumulative"],
+                        mode="lines", name="Exec Fees",
+                        line=dict(color="#e67e22", dash="dot"),
                     ))
 
-                    fig_sym.update_layout(
-                        title=f"Cumulative PNL — {sym} ({label})",
-                        xaxis_title="Date", yaxis_title=label,
-                        yaxis_tickformat=".6f",
-                        hovermode="x unified", height=400,
-                        xaxis=dict(range=_xrange) if _xrange else {},
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                # Total: gross position gains + funding + fees (no double-count)
+                _all_events = [sym_trade[["timestamp", "net_position_pnl"]].rename(columns={"net_position_pnl": "delta"})]
+                if not sym_fund.empty:
+                    _all_events.append(sym_fund[["timestamp", "amount_xbt"]].rename(columns={"amount_xbt": "delta"}))
+                if not sym_fee.empty:
+                    _all_events.append(sym_fee[["timestamp", "fee_xbt"]].rename(columns={"fee_xbt": "delta"}))
+                _tot_d = pd.concat(_all_events, ignore_index=True).sort_values("timestamp")
+                _tot_d = _tot_d.assign(cumulative=_tot_d["delta"].cumsum())
+                fig_sym.add_trace(go.Scatter(
+                    x=_tot_d["timestamp"], y=_tot_d["cumulative"],
+                    mode="lines", name="Total",
+                    line=dict(color="#aaaaaa", width=1.5),
+                ))
+
+                _pnl_last_ts = _tot_d["timestamp"].max()
+                _pnl_first_ts = _tot_d["timestamp"].min()
+                _pnl_pad = max((_pnl_last_ts - _pnl_first_ts) * 0.05, pd.Timedelta(days=2))
+                _pnl_xrange = [_xrange[0], max(_xrange[1], _pnl_last_ts + _pnl_pad)] if _xrange else [_pnl_first_ts, _pnl_last_ts + _pnl_pad]
+
+                fig_sym.update_layout(
+                    title=f"Cumulative PNL — {sym} ({label})",
+                    xaxis_title="Date", yaxis_title=label,
+                    yaxis_tickformat=".6f",
+                    hovermode="x unified", height=400,
+                    xaxis=dict(range=_pnl_xrange),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_sym, width="stretch", key=f"pnl_sym_{sym}")
+
+                # ── Open position size chart ───────────────────────────
+                if not sym_fee.empty:
+                    _exec_qty = sym_fee[["timestamp", "side", "qty"]].copy()
+                    _exec_qty["signed_qty"] = _exec_qty.apply(
+                        lambda r: r["qty"] if str(r["side"]).lower() == "buy" else -r["qty"], axis=1
                     )
-                    st.plotly_chart(fig_sym, width="stretch", key=f"pnl_sym_{sym}")
+                    _exec_qty = _exec_qty.sort_values("timestamp").reset_index(drop=True)
+                    _exec_qty["open_qty"] = _exec_qty["signed_qty"].cumsum()
+                    _exec_qty["color"] = _exec_qty["open_qty"].apply(
+                        lambda v: "#2ecc71" if v > 0 else ("#e74c3c" if v < 0 else "#aaaaaa")
+                    )
+                    _exec_qty["group"] = (_exec_qty["color"] != _exec_qty["color"].shift()).cumsum()
+                    fig_qty = go.Figure()
+                    for _, _seg in _exec_qty.groupby("group", sort=True):
+                        _color = _seg["color"].iloc[0]
+                        _first_idx = _seg.index[0]
+                        if _first_idx > 0:
+                            _prev = _exec_qty.loc[_first_idx - 1]
+                            _xs = [_prev["timestamp"]] + list(_seg["timestamp"])
+                            _ys = [_prev["open_qty"]] + list(_seg["open_qty"])
+                        else:
+                            _xs = list(_seg["timestamp"])
+                            _ys = list(_seg["open_qty"])
+                        fig_qty.add_trace(go.Scatter(
+                            x=_xs, y=_ys,
+                            mode="lines",
+                            line=dict(color=_color, shape="vh"),
+                            showlegend=False,
+                            name="",
+                            hovertemplate="%{y:,.0f}<extra></extra>",
+                        ))
+                    _qty_abs_max = _exec_qty["open_qty"].abs().max() or 1
+                    _qty_last_ts = _exec_qty["timestamp"].max()
+                    _qty_first_ts = _exec_qty["timestamp"].min()
+                    _qty_pad = max((_qty_last_ts - _qty_first_ts) * 0.05, pd.Timedelta(days=2))
+                    _qty_xrange = [_xrange[0], max(_xrange[1], _qty_last_ts + _qty_pad)] if _xrange else [_qty_first_ts, _qty_last_ts + _qty_pad]
 
-                    # ── Trade history table ────────────────────────────────
-                    st.subheader("Trade History")
-                    tbl_df = sym_trade[["timestamp", "side", "qty", "price", "realised_pnl", "fee_xbt"]].copy()
-                    tbl_df = tbl_df.sort_values("timestamp", ascending=False)
-                    tbl_df.columns = ["Timestamp", "Side", "Qty", "Price", f"PNL ({label})", f"Fee ({label})"]
+                    fig_qty.update_layout(
+                        title=f"Open Position Size — {sym}",
+                        xaxis_title="Date",
+                        yaxis=dict(
+                            title="Qty (contracts)",
+                            range=[-_qty_abs_max, _qty_abs_max],
+                        ),
+                        hovermode="x unified",
+                        height=300,
+                        xaxis=dict(range=_qty_xrange),
+                        margin=dict(t=40, b=40),
+                    )
+                    st.plotly_chart(fig_qty, width="stretch", key=f"qty_{sym}")
+
+                # ── Trade history table ────────────────────────────────
+                st.subheader("Trade History")
+                # Use _fees_aug so the PNL column shows either BitMEX realisedPnl
+                # (post-Nov 2024) or FIFO-computed PNL (earlier records).
+                _all_sym_fills = _fees_aug[_fees_aug["symbol"] == sym].copy() if not _fees_aug.empty else pd.DataFrame()
+                tbl_df = _all_sym_fills[["timestamp", "side", "qty", "price", "net_position_pnl", "fee_xbt"]].copy() if not _all_sym_fills.empty else pd.DataFrame()
+                tbl_df = tbl_df.sort_values("timestamp", ascending=False)
+                tbl_df.columns = ["Timestamp", "Side", "Qty", "Price", f"PNL ({label})", f"Fee ({label})"]
+                st.dataframe(
+                    tbl_df.style.format({
+                        f"PNL ({label})": "{:+.8f}",
+                        f"Fee ({label})": "{:+.8f}",
+                        "Price": _fmt_price,
+                    }),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                # ── Funding history table ──────────────────────────────
+                if not sym_fund.empty:
+                    st.subheader("Funding History")
+                    fund_tbl = sym_fund[["timestamp", "amount_xbt", "position_qty"]].copy()
+                    fund_tbl = fund_tbl.sort_values("timestamp", ascending=False)
+                    fund_tbl.columns = ["Timestamp", f"Amount ({label})", "Position Qty"]
                     st.dataframe(
-                        tbl_df.style.format({
-                            f"PNL ({label})": "{:+.8f}",
-                            f"Fee ({label})": "{:+.8f}",
-                            "Price": "{:,.2f}",
-                        }),
+                        fund_tbl.style.format({f"Amount ({label})": "{:+.8f}"}),
                         width="stretch",
                         hide_index=True,
                     )
-
-                    # ── Funding history table ──────────────────────────────
-                    if not sym_fund.empty:
-                        st.subheader("Funding History")
-                        fund_tbl = sym_fund[["timestamp", "amount_xbt", "position_qty"]].copy()
-                        fund_tbl = fund_tbl.sort_values("timestamp", ascending=False)
-                        fund_tbl.columns = ["Timestamp", f"Amount ({label})", "Position Qty"]
-                        st.dataframe(
-                            fund_tbl.style.format({f"Amount ({label})": "{:+.8f}"}),
-                            width="stretch",
-                            hide_index=True,
-                        )
 
 # ================================================================== #
 # TAB 5: Deposits & Withdrawals                                        #

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from trading_analysis.db import repository
 from trading_analysis.db.models import init_db
 from trading_analysis.exchange import FundingAnalysisClient
+from trading_analysis.fifo import _compute_fifo_pnl_series
 
 # ------------------------------------------------------------------ #
 # Config + env                                                         #

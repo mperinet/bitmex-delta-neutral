@@ -79,6 +79,7 @@ This is an async, delta-neutral automated trading engine for BitMEX. The engine 
 | Control CLI | `scripts/ctl.py` | Operator CLI — sends commands to the control server |
 | Dashboard | `dashboard/app.py` | Read-only Streamlit UI, polls DB every 5s |
 | Trading Analysis | `trading_analysis/app.py` | Read-only analytics dashboard on port 8502; fetches account-wide funding payments + execution fees from BitMEX via dedicated readonly API keys; owns its own SQLite DB (`data/trading_analysis.db`) |
+| Funding Analysis | `funding_analysis/app.py` | Read-only market analysis dashboard on port 8503; aggregates BitMEX + HyperLiquid funding rates and Binance USD margin borrow cost to identify delta-neutral opportunities; owns its own SQLite DB (`data/funding_analysis.db`). Public APIs for HL/BitMEX funding; Binance readonly key required for margin-rate history and user borrow history |
 
 ### Strategies
 

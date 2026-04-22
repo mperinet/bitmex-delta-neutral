@@ -715,7 +715,7 @@ with tab_funding:
                     _1y_usdt_syms = [s for s in _usdt_syms if s in _1y_df["symbol"].values]
                     st.plotly_chart(
                         _build_daily_agg_fig(_1y_usdt_syms, _1y_df, "USDT", _1y_ago, _now),
-                        use_container_width=True, key="overview_1y_usdt",
+                        width="stretch", key="overview_1y_usdt",
                     )
                 else:
                     st.caption("No USDT-settled symbols in data.")
@@ -732,7 +732,7 @@ with tab_funding:
                         [s for s in _xbt_syms if s in _overview_df["symbol"].values],
                         _overview_df, "XBT", _30d_ago, _now,
                     )
-                    st.plotly_chart(_fig_xbt, use_container_width=True, key="overview_xbt")
+                    st.plotly_chart(_fig_xbt, width="stretch", key="overview_xbt")
                 else:
                     st.caption("No XBT-settled symbols in data.")
             with _ov_col_usdt:
@@ -743,7 +743,7 @@ with tab_funding:
                         _overview_df,
                         "USDT",
                     )
-                    st.plotly_chart(_fig_usdt, use_container_width=True, key="overview_usdt")
+                    st.plotly_chart(_fig_usdt, width="stretch", key="overview_usdt")
                 else:
                     st.caption("No USDT-settled symbols in data.")
 
@@ -796,7 +796,7 @@ with tab_funding:
                         f"<span style='font-size:0.8em; color:gray;'>{_xbt_total:+.6f} XBT{_xbt_usd_str} — (last 30 days)</span>",
                         unsafe_allow_html=True,
                     )
-                    st.plotly_chart(_build_daily_bar(_xbt_syms_present, _overview_df, "XBT", _btc_usd_price), use_container_width=True, key="daily_xbt")
+                    st.plotly_chart(_build_daily_bar(_xbt_syms_present, _overview_df, "XBT", _btc_usd_price), width="stretch", key="daily_xbt")
                 else:
                     st.subheader("XBT-settled daily total")
                     st.caption("No XBT-settled symbols in data.")
@@ -812,7 +812,7 @@ with tab_funding:
                         f"<span style='font-size:0.8em; color:gray;'>{_usdt_total:+,.2f} USDT — (last 30 days)</span>",
                         unsafe_allow_html=True,
                     )
-                    st.plotly_chart(_build_daily_bar(_usdt_syms_present, _overview_df, "USDT"), use_container_width=True, key="daily_usdt")
+                    st.plotly_chart(_build_daily_bar(_usdt_syms_present, _overview_df, "USDT"), width="stretch", key="daily_usdt")
                 else:
                     st.subheader("USDT-settled daily total")
                     st.caption("No USDT-settled symbols in data.")

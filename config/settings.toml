@@ -48,3 +48,12 @@ port = 8552
 [trading_analysis]
 db_url = "sqlite+aiosqlite:///data/trading_analysis.db"
 testnet = false   # set to false to use live capital keys
+
+[funding_analysis]
+db_url = "sqlite+aiosqlite:///data/funding_analysis.db"
+initial_backfill_days = 90
+asset_universe_refresh_days = 7
+hyperliquid_api_url = "https://api.hyperliquid.xyz"
+binance_margin_assets = ["USDT", "USDC"]
+binance_vip_level = 0
+sync_interval_delay_ms = 100

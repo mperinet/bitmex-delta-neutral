@@ -1,3 +1,5 @@
 {
-  "disabledMcpjsonServers": ["argent"]
+  "permissions": {
+    "allow": ["Bash(uv run *)"]
+  }
 }
